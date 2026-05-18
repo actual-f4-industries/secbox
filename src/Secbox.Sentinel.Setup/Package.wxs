@@ -35,15 +35,18 @@
 
     <Feature Id="Main" Title="Secbox Sentinel" Level="1">
       <!--
-        SentinelComponents is produced at build time by the wixproj's
-        <HarvestFiles> item — one component per file under $(HarvestFolder),
-        all rooted at INSTALLFOLDER. The auto-generated fragment lands in
-        obj/Release/ and is compiled into the package transparently.
+        WiX v5 allows <Files> inside <ComponentGroup>, which is the cleanest
+        way to harvest a directory tree (replaces v3's heat invocation and
+        v4.0.x's container-restricted <Files> placement).
       -->
       <ComponentGroupRef Id="SentinelComponents" />
       <ComponentRef Id="ServiceRegistration" />
       <ComponentRef Id="EventLogRegistration" />
     </Feature>
+
+    <ComponentGroup Id="SentinelComponents" Directory="INSTALLFOLDER">
+      <Files Include="$(var.HarvestFolder)\**" />
+    </ComponentGroup>
 
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="ServiceRegistration" Guid="3e1d4a85-2f9c-4eb8-95a3-c97f0e842110">
