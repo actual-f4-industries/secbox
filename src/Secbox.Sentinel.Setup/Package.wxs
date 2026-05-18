@@ -65,13 +65,23 @@
                         Start="auto"
                         ErrorControl="normal"
                         Vital="yes"
-                        Account="LocalSystem">
-          <util:ServiceConfig FirstFailureActionType="restart"
-                              SecondFailureActionType="restart"
-                              ThirdFailureActionType="none"
-                              RestartServiceDelayInSeconds="10"
-                              ResetPeriodInDays="1" />
-        </ServiceInstall>
+                        Account="LocalSystem" />
+
+        <!--
+          Auto-restart-on-failure. <util:ServiceConfig> MUST be a sibling of
+          <ServiceInstall> (not nested inside it) so its deferred CA
+          (Wix4ExecServiceConfig_X64) schedules after InstallServices has
+          actually registered the service. Nested placement produces error
+          0x80070424 "Service does not exist" and MSI exit 1603 — that
+          ordering bug is why this element lives here, not inside
+          <ServiceInstall>. ServiceName binds the CA to our service by name.
+        -->
+        <util:ServiceConfig ServiceName="SecboxSentinel"
+                            FirstFailureActionType="restart"
+                            SecondFailureActionType="restart"
+                            ThirdFailureActionType="none"
+                            RestartServiceDelayInSeconds="10"
+                            ResetPeriodInDays="1" />
 
         <ServiceControl Id="SecboxSentinelServiceControl"
                         Name="SecboxSentinel"
