@@ -113,12 +113,14 @@ public:
         //   COR_PRF_MONITOR_REMOTING
         //   COR_PRF_MONITOR_FRAME_INFO
         // Setting any of those post-attach can crash the host. The set below
-        // is the documented "always-safe-for-attach" subset.
-        // (See dotnet/runtime profilers/Loading-and-Attach.md.)
+        // is the documented "always-safe-for-attach" subset MINUS exceptions.
+        // EXCEPTIONS removed because the editor throws hundreds of
+        // first-chance exceptions per second during normal operation —
+        // each fire would push to our ring, the ring would churn constantly,
+        // and the managed sink would be flooded for no useful signal.
         DWORD mask = COR_PRF_MONITOR_MODULE_LOADS
                    | COR_PRF_MONITOR_ASSEMBLY_LOADS
-                   | COR_PRF_MONITOR_APPDOMAIN_LOADS
-                   | COR_PRF_MONITOR_EXCEPTIONS;
+                   | COR_PRF_MONITOR_APPDOMAIN_LOADS;
         DWORD maskHi = 0;
         HRESULT smHr = info_->SetEventMask2(mask, maskHi);
         if (FAILED(smHr)) {

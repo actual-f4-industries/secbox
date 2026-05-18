@@ -42,6 +42,9 @@ public sealed class ProfilerSensor : ISensor
     static ChannelWriter<SensorEvent>? _sink;
     static long _sequence;
 
+    Task? _pollTask;
+    CancellationTokenSource? _pollCts;
+
     public async Task StartAsync(SensorOptions options, ChannelWriter<SensorEvent> sink, CancellationToken ct)
     {
         Status = SensorStatus.Starting;
@@ -62,9 +65,15 @@ public sealed class ProfilerSensor : ISensor
             {
                 var cb = (nint)NativeCallbackPtr;
                 RegisterCallbackThunk(cb);
-                if (ProfilerCoordinator.DrainRingFn != IntPtr.Zero)
-                    DrainRingThunk();
             }
+
+            // Native Emit ALWAYS pushes to the in-process ring (never calls
+            // our managed callback synchronously from the profiler thread —
+            // that would deadlock against the CLR loader lock). We drain
+            // the ring from our own thread here. 50ms is a balance between
+            // event latency and CPU overhead for a typically-quiet ring.
+            _pollCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            _pollTask = Task.Run(() => PollLoop(_pollCts.Token), _pollCts.Token);
 
             Status = SensorStatus.Healthy;
         }
@@ -75,8 +84,31 @@ public sealed class ProfilerSensor : ISensor
         }
     }
 
-    public Task StopAsync(CancellationToken ct)
+    static async Task PollLoop(CancellationToken ct)
     {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                unsafe
+                {
+                    if (ProfilerCoordinator.DrainRingFn != IntPtr.Zero)
+                    {
+                        var drain = (delegate* unmanaged[Stdcall]<void>)ProfilerCoordinator.DrainRingFn;
+                        drain();
+                    }
+                }
+            }
+            catch { /* never tear down the poll loop on a transient error */ }
+            try { await Task.Delay(50, ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { return; }
+        }
+    }
+
+    public async Task StopAsync(CancellationToken ct)
+    {
+        try { _pollCts?.Cancel(); } catch { }
+        if (_pollTask != null) { try { await _pollTask.ConfigureAwait(false); } catch { } }
         try
         {
             unsafe
@@ -88,7 +120,6 @@ public sealed class ProfilerSensor : ISensor
         catch { }
         _sink = null;
         Status = SensorStatus.Disabled;
-        return Task.CompletedTask;
     }
 
     [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]

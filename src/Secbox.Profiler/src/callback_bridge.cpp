@@ -16,15 +16,16 @@ void SetInitialized(bool v) { g_initialized.store(v, std::memory_order_release);
 bool IsInitialized() { return g_initialized.load(std::memory_order_acquire); }
 
 void Emit(int32_t kind, std::wstring payload) {
-    auto cb = g_callback.load(std::memory_order_acquire);
-    if (cb != nullptr) {
-        // Direct dispatch. Caller of the callback (managed side) is
-        // responsible for never throwing back into native — exceptions out
-        // of a CoreCLR callback into native code are undefined.
-        try { cb(kind, payload.c_str()); } catch (...) { /* swallow */ }
-        return;
-    }
-    // No callback yet — buffer.
+    // ALWAYS push to the ring — never call the managed callback synchronously
+    // from a profiler-thread context. ICorProfilerCallback methods like
+    // ModuleLoadFinished and AssemblyLoadFinished fire while the CLR holds
+    // the loader lock; calling back into managed code on that thread can
+    // trigger an allocation under the same lock and deadlock or crash the
+    // host. The managed side drains this ring from its own thread via a
+    // periodic Secbox_DrainRing() call (see ProfilerSensor poll loop).
+    //
+    // Ring is bounded; oldest entries drop when full. The pre_callback_ring
+    // name is historical — it serves the same purpose post-callback now.
     (void)g_pre_callback_ring.TryPush(kind, std::move(payload));
 }
 
