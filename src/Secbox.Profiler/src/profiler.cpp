@@ -99,24 +99,43 @@ public:
         if (unk == nullptr) return E_INVALIDARG;
         HRESULT hr = unk->QueryInterface(__uuidof(ICorProfilerInfo11), reinterpret_cast<void**>(&info_));
         if (FAILED(hr)) {
-            // Older runtime — best-effort fall through is fine for observer-
-            // only mode. Future IL-rewrite phase requires Info10+.
             hr = unk->QueryInterface(__uuidof(ICorProfilerInfo3), reinterpret_cast<void**>(&info_));
             if (FAILED(hr)) return hr;
         }
 
+        // Event mask is ATTACH-SAFE only. CoreCLR forbids the following flags
+        // when the profiler is loaded via DiagnosticsClient.AttachProfiler:
+        //   COR_PRF_MONITOR_JIT_COMPILATION
+        //   COR_PRF_ENABLE_REJIT
+        //   COR_PRF_MONITOR_CODE_TRANSITIONS
+        //   COR_PRF_MONITOR_FUNCTION_UNLOADS
+        //   COR_PRF_MONITOR_CLASS_LOADS
+        //   COR_PRF_MONITOR_REMOTING
+        //   COR_PRF_MONITOR_FRAME_INFO
+        // Setting any of those post-attach can crash the host. The set below
+        // is the documented "always-safe-for-attach" subset.
+        // (See dotnet/runtime profilers/Loading-and-Attach.md.)
         DWORD mask = COR_PRF_MONITOR_MODULE_LOADS
                    | COR_PRF_MONITOR_ASSEMBLY_LOADS
-                   | COR_PRF_MONITOR_JIT_COMPILATION
-                   | COR_PRF_MONITOR_EXCEPTIONS
-                   | COR_PRF_ENABLE_REJIT;       // future IL rewrite
+                   | COR_PRF_MONITOR_APPDOMAIN_LOADS
+                   | COR_PRF_MONITOR_EXCEPTIONS;
         DWORD maskHi = 0;
-        // ICorProfilerInfo methods return HRESULT — they don't throw managed
-        // exceptions. SetEventMask2 failure isn't fatal for observer-only mode.
-        (void)info_->SetEventMask2(mask, maskHi);
+        HRESULT smHr = info_->SetEventMask2(mask, maskHi);
+        if (FAILED(smHr)) {
+            // Don't surface the failure — better to be an observer with no
+            // events than to abort the attach and risk destabilizing the host.
+        }
 
         SetInitialized(true);
-        Emit(EK_ProfilerAttached, L"{}");
+        // Defer the first Emit until AFTER Initialize returns. Some CLR
+        // versions hold internal locks during Initialize that std::wstring
+        // allocation can deadlock against in rare cases. ProfilerAttached
+        // notification fires from ProfilerAttachComplete instead.
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE ProfilerAttachComplete() override {
+        try { Emit(EK_ProfilerAttached, L"{}"); } catch (...) { /* swallow */ }
         return S_OK;
     }
 
@@ -238,7 +257,6 @@ public:
     HRESULT STDMETHODCALLTYPE InitializeForAttach(IUnknown* unk, void*, UINT) override {
         return Initialize(unk);
     }
-    HRESULT STDMETHODCALLTYPE ProfilerAttachComplete() override { return S_OK; }
     HRESULT STDMETHODCALLTYPE ProfilerDetachSucceeded() override { return S_OK; }
     // ICorProfilerCallback4+
     HRESULT STDMETHODCALLTYPE ReJITCompilationStarted(FunctionID, ReJITID, BOOL) override { return S_OK; }
@@ -268,7 +286,14 @@ public:
         ThreadID, ULONG, UINT_PTR[]) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE EventPipeProviderCreated(EVENTPIPE_PROVIDER) override { return S_OK; }
     // ICorProfilerCallback11+
-    HRESULT STDMETHODCALLTYPE LoadAsNotificationOnly(BOOL*) override { return S_OK; }
+    // CLR passes a BOOL* the profiler MUST write to. Leaving it untouched
+    // is undefined behaviour — the CLR reads it to decide whether to grant
+    // notification-only mode (limited capabilities). We opt for full
+    // profiler mode by writing FALSE.
+    HRESULT STDMETHODCALLTYPE LoadAsNotificationOnly(BOOL* pbNotificationOnly) override {
+        if (pbNotificationOnly) *pbNotificationOnly = FALSE;
+        return S_OK;
+    }
 
 private:
     std::wstring BuildAssemblyPayload(AssemblyID asmId) {
