@@ -8,30 +8,20 @@
       Source folder of the published Sentinel service. The release workflow
       runs `dotnet publish -r win-x64 -c Release` on Secbox.Sentinel.Service
       and points HarvestFolder at the publish output before invoking msbuild
-      on this project. Locally, set HarvestFolder=...\publish to test.
+      on this project. Local: set HarvestFolder=...\publish to test.
     -->
     <HarvestFolder Condition="'$(HarvestFolder)' == ''">..\Secbox.Sentinel.Service\bin\Release\net10.0-windows\win-x64\publish</HarvestFolder>
+
+    <!--
+      Pass HarvestFolder to the WiX preprocessor so Package.wxs's
+      <Files Include="$(var.HarvestFolder)\**" /> resolves. WiX v4 reads
+      DefineConstants and exposes each entry as $(var.NAME).
+    -->
+    <DefineConstants>HarvestFolder=$(HarvestFolder)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="WixToolset.Heat" Version="4.0.5" />
     <PackageReference Include="WixToolset.Util.wixext" Version="4.0.5" />
   </ItemGroup>
-
-  <ItemGroup>
-    <Compile Include="Package.wxs" />
-  </ItemGroup>
-
-  <!--
-    Harvest the publish directory into a fragment at build time so we
-    don't have to maintain a hand-written file manifest for every new
-    Sentinel.Service dependency dropped by `dotnet publish`.
-  -->
-  <Target Name="HarvestPublish" BeforeTargets="BeforeBuild">
-    <Exec Command="heat dir &quot;$(HarvestFolder)&quot; -nologo -dr INSTALLFOLDER -cg SentinelComponents -gg -g1 -srd -sreg -scom -var var.HarvestFolder -out &quot;$(IntermediateOutputPath)Harvested.wxs&quot;" />
-    <ItemGroup>
-      <Compile Include="$(IntermediateOutputPath)Harvested.wxs" />
-    </ItemGroup>
-  </Target>
 
 </Project>

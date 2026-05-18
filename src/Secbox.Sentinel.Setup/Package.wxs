@@ -10,6 +10,10 @@
   The MSI is signed in CI when SignPath/Microsoft Trusted Signing creds are
   configured; unsigned local builds work too, the user just sees a UAC red
   banner instead of a blue one.
+
+  Bitness: x64 inherited from the wixproj's <InstallerPlatform>x64</InstallerPlatform>.
+  WiX v4 removed the per-Component Win64 attribute; components default to
+  the package's bitness automatically.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
@@ -23,40 +27,34 @@
     <MajorUpgrade DowngradeErrorMessage="A newer version of Secbox Sentinel is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
-    <!--
-      Files placed under Program Files\Secbox\Sentinel\. The harvested
-      fragment (Harvested.wxs, produced at build time from the publish
-      output) populates the SentinelComponents component group.
-    -->
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="SECBOX_ROOT" Name="Secbox">
         <Directory Id="INSTALLFOLDER" Name="Sentinel" />
       </Directory>
     </StandardDirectory>
 
-    <!--
-      Service install. KeyPath via the service exe component (synthesized by
-      heat). The Service* elements live in a component co-installed with
-      the exe; we reference the harvested component group here.
-    -->
     <Feature Id="Main" Title="Secbox Sentinel" Level="1">
-      <ComponentGroupRef Id="SentinelComponents" />
+      <!--
+        WiX v4 <Files> auto-creates one Component per file under the
+        pattern, all rooted at INSTALLFOLDER via the surrounding DirectoryRef.
+        Replaces the WiX v3 heat-harvest fragment we used to need.
+      -->
+      <ComponentGroupRef Id="SentinelFilesGroup" />
       <ComponentRef Id="ServiceRegistration" />
       <ComponentRef Id="EventLogRegistration" />
     </Feature>
 
-    <!--
-      Service registration in a hand-authored component because harvested
-      components are file-only. KeyPath is a synthetic registry value so
-      the service install is keyed independently of the exe.
-    -->
+    <ComponentGroup Id="SentinelFilesGroup" Directory="INSTALLFOLDER">
+      <Files Include="$(var.HarvestFolder)\**" />
+    </ComponentGroup>
+
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="ServiceRegistration" Guid="3e1d4a85-2f9c-4eb8-95a3-c97f0e842110" Win64="yes">
+      <Component Id="ServiceRegistration" Guid="3e1d4a85-2f9c-4eb8-95a3-c97f0e842110">
         <RegistryValue Root="HKLM"
                        Key="SOFTWARE\secbox\Sentinel"
-                       Name="InstalledVersion"
-                       Type="string"
-                       Value="!(bind.fileVersion.SecboxSentinel.exe)"
+                       Name="Installed"
+                       Type="integer"
+                       Value="1"
                        KeyPath="yes" />
 
         <ServiceInstall Id="SecboxSentinelService"
@@ -88,11 +86,8 @@
         Microsoft.Extensions.Logging.EventLog emit doesn't trip the
         "source does not exist" path that requires admin to fix.
       -->
-      <Component Id="EventLogRegistration" Guid="b9c0e7a1-3d22-4ad9-9c1a-7e2f0b8f9112" Win64="yes">
+      <Component Id="EventLogRegistration" Guid="b9c0e7a1-3d22-4ad9-9c1a-7e2f0b8f9112">
         <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\SecboxSentinel">
-          <RegistryValue Type="string"
-                         Name="EventMessageFile"
-                         Value="[NETFRAMEWORK40FULLINSTALLROOTDIR]EventLogMessages.dll" />
           <RegistryValue Type="integer" Name="TypesSupported" Value="7" />
         </RegistryKey>
         <RegistryValue Root="HKLM"
@@ -104,10 +99,6 @@
       </Component>
     </DirectoryRef>
 
-    <!--
-      Reference the harvested exe by canonical id so the bind expression
-      above resolves. Heat generates id "SecboxSentinel.exe".
-    -->
   </Package>
 
 </Wix>
