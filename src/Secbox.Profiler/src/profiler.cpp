@@ -15,15 +15,12 @@
 #include "profiler.h"
 #include "event_ring.h"
 
-// INITGUID must be defined exactly once in the program before <initguid.h>
-// so the DEFINE_GUID macros in corprof.h/cor.h emit actual GUID storage
-// instead of `extern` declarations. profiler.cpp is the sole TU that pulls
-// in the CorProf headers; declaring INITGUID anywhere else would double-
-// define every IID at link time.
-#ifndef INITGUID
-#define INITGUID
-#endif
-#include <initguid.h>
+// corprof.h declares each IID as EXTERN_C const IID with the actual storage
+// living in a separate MIDL-generated corprof_i.cpp we don't bundle. Rather
+// than fetch that file, we use the MSVC __uuidof() compile-time intrinsic in
+// QueryInterface — every interface in corprof.h is decorated with
+// MIDL_INTERFACE("guid") which expands to __declspec(uuid(...)), and
+// __uuidof reads that attribute without needing any IID storage at link time.
 
 #include <cor.h>
 #include <corhdr.h>
@@ -71,18 +68,18 @@ public:
     // === IUnknown ===
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
         if (ppv == nullptr) return E_POINTER;
-        if (riid == IID_IUnknown ||
-            riid == IID_ICorProfilerCallback ||
-            riid == IID_ICorProfilerCallback2 ||
-            riid == IID_ICorProfilerCallback3 ||
-            riid == IID_ICorProfilerCallback4 ||
-            riid == IID_ICorProfilerCallback5 ||
-            riid == IID_ICorProfilerCallback6 ||
-            riid == IID_ICorProfilerCallback7 ||
-            riid == IID_ICorProfilerCallback8 ||
-            riid == IID_ICorProfilerCallback9 ||
-            riid == IID_ICorProfilerCallback10 ||
-            riid == IID_ICorProfilerCallback11) {
+        if (riid == __uuidof(IUnknown) ||
+            riid == __uuidof(ICorProfilerCallback) ||
+            riid == __uuidof(ICorProfilerCallback2) ||
+            riid == __uuidof(ICorProfilerCallback3) ||
+            riid == __uuidof(ICorProfilerCallback4) ||
+            riid == __uuidof(ICorProfilerCallback5) ||
+            riid == __uuidof(ICorProfilerCallback6) ||
+            riid == __uuidof(ICorProfilerCallback7) ||
+            riid == __uuidof(ICorProfilerCallback8) ||
+            riid == __uuidof(ICorProfilerCallback9) ||
+            riid == __uuidof(ICorProfilerCallback10) ||
+            riid == __uuidof(ICorProfilerCallback11)) {
             *ppv = static_cast<ICorProfilerCallback11*>(this);
             AddRef();
             return S_OK;
@@ -100,11 +97,11 @@ public:
     // === Initialize / Shutdown ===
     HRESULT STDMETHODCALLTYPE Initialize(IUnknown* unk) override {
         if (unk == nullptr) return E_INVALIDARG;
-        HRESULT hr = unk->QueryInterface(IID_ICorProfilerInfo11, reinterpret_cast<void**>(&info_));
+        HRESULT hr = unk->QueryInterface(__uuidof(ICorProfilerInfo11), reinterpret_cast<void**>(&info_));
         if (FAILED(hr)) {
             // Older runtime — best-effort fall through is fine for observer-
             // only mode. Future IL-rewrite phase requires Info10+.
-            hr = unk->QueryInterface(IID_ICorProfilerInfo3, reinterpret_cast<void**>(&info_));
+            hr = unk->QueryInterface(__uuidof(ICorProfilerInfo3), reinterpret_cast<void**>(&info_));
             if (FAILED(hr)) return hr;
         }
 
