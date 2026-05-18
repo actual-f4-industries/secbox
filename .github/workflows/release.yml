@@ -200,14 +200,37 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
+  # 4b. Preflight: secrets aren't readable in job-level `if:`, so a tiny
+  #     check job reads them into an output that downstream jobs can gate on.
+  # -------------------------------------------------------------------------
+  signing-preflight:
+    name: Signing config preflight
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.check.outputs.enabled }}
+    steps:
+      - id: check
+        env:
+          TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+        run: |
+          if [ -n "$TOKEN" ] && [ -n "$SLUG" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets present — sign job will run."
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Signing secrets absent — sign job will be skipped (release ships unsigned)."
+          fi
+
+  # -------------------------------------------------------------------------
   # 5. (Optional) sign everything that can be signed. Skipped if secrets
   #    aren't configured.
   # -------------------------------------------------------------------------
   sign:
     name: Sign artifacts (optional)
     runs-on: windows-latest
-    needs: [ build-managed, build-profiler, build-installer ]
-    if: ${{ env.SIGNPATH_API_TOKEN != '' && env.SIGNPATH_PROJECT_SLUG != '' }}
+    needs: [ build-managed, build-profiler, build-installer, signing-preflight ]
+    if: needs.signing-preflight.outputs.enabled == 'true'
     steps:
       - uses: actions/checkout@v4
 
