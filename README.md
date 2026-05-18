@@ -30,6 +30,21 @@ dotnet run --project src/Secbox.Cli -- scan /path/to/library/folder
 
 Output is JSON (`ScanReport` schema). Pipe to `jq` for readability.
 
+## Distribution
+
+Bridge artifacts (`Secbox.Core.dll`, dependencies, native CLR profiler, and
+the Sentinel MSI) are published as GitHub Release assets at
+[`actual-f4-industries/secbox/releases`](https://github.com/actual-f4-industries/secbox/releases).
+The s&box adapter resolves them via
+
+```
+https://github.com/actual-f4-industries/secbox/releases/download/<tag>/<file>
+```
+
+and refuses any blob whose SHA-256 doesn't match the value pinned in the
+adapter's `CorePolicy.CoreFiles`. Each release also attaches a `hashes.txt`
+manifest so adapter maintainers can sync the pins in one step.
+
 ## Reporting security issues
 
 If you find a way to evade detection, please contact the maintainer privately

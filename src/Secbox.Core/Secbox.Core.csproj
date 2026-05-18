@@ -5,6 +5,12 @@
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
         <!--
+            ProfilerSensor uses unmanaged function pointers (delegate*) to
+            register the native callback with the CLR profiler — same
+            mechanism .NET runtime libraries use for callback boundaries.
+        -->
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <!--
             Class libraries don't normally copy NuGet dependencies into bin.
             Secbox.Core is the ship target (loaded by the editor adapter via
             AssemblyLoadContext), so we need every dep beside it.
@@ -16,6 +22,30 @@
         <ProjectReference Include="..\Secbox.Contracts\Secbox.Contracts.csproj" />
         <ProjectReference Include="..\Secbox.Rules\Secbox.Rules.csproj" />
         <ProjectReference Include="..\Secbox.Scanner\Secbox.Scanner.csproj" />
+        <ProjectReference Include="..\Secbox.Sentinel.Client\Secbox.Sentinel.Client.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!--
+            DiagnosticsClient.AttachProfiler — used by ProfilerCoordinator to
+            attach Tier B from inside the editor process (attach mode, no
+            launcher shim required).
+        -->
+        <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.553101" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <!--
+            Native profiler binaries are embedded as resources so the editor
+            adapter doesn't need a second download. Manifest path matches
+            ProfilerCoordinator.SelectPlatformResource(). Files missing from
+            disk at build time are simply not embedded — the runtime check
+            in ProfilerCoordinator.ExtractAndVerify throws a clear error.
+        -->
+        <EmbeddedResource Include="Profiler\EmbeddedProfilerResources\secbox-profiler-win-x64.dll"
+                          Condition="Exists('Profiler\EmbeddedProfilerResources\secbox-profiler-win-x64.dll')">
+            <LogicalName>Secbox.Core.Profiler.EmbeddedProfilerResources.secbox-profiler-win-x64.dll</LogicalName>
+        </EmbeddedResource>
     </ItemGroup>
 
     <!--

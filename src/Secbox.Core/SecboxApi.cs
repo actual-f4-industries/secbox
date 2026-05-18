@@ -1,6 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Secbox.Contracts;
+using Secbox.Core.RuntimeSensors;
+using Secbox.Core.RuntimeSensors.Sensors;
+using Secbox.Core.RuntimeSensors.Sinks;
 using Secbox.Rules.Packs;
 using Secbox.Scanner.Pipeline;
 
@@ -99,4 +102,121 @@ public static class SecboxApi
     // Wire-format for the options arg — bundles ScanOptions + Policy so the
     // editor can pass both in one JSON payload.
     public sealed record ScanRequest(ScanOptions? Options, Policy? Policy);
+
+    // ============================================================
+    // Runtime sensors (BridgeProtocol v2)
+    //
+    // The adapter calls AttachRuntimeSensors once after EnsureReady.
+    // Returns a sensor-attach result JSON with per-sensor status. Events
+    // flow back through `eventSink` as JSON lines (one finding per call).
+    // ============================================================
+
+    static SensorRegistry? _runtimeSensors;
+    static readonly object _runtimeLock = new();
+
+    /// <summary>
+    /// Attach runtime sensors (Tier B profiler always; Tier A ETW iff
+    /// options say so). `eventSink` receives JSON-line AttributedFinding
+    /// payloads asynchronously.
+    /// </summary>
+    public static string AttachRuntimeSensors(string optionsJson, Action<string> eventSink)
+    {
+        try
+        {
+            var opts = string.IsNullOrWhiteSpace(optionsJson)
+                ? new RuntimeSensorOptions(EnableProfiler: true, EnableEtw: false)
+                : JsonSerializer.Deserialize<RuntimeSensorOptions>(optionsJson, JsonOpts)
+                    ?? new RuntimeSensorOptions(true, false);
+
+            lock (_runtimeLock)
+            {
+                if (_runtimeSensors != null)
+                    return JsonSerializer.Serialize(new RuntimeSensorAttachResult(
+                        Attached: false,
+                        Message: "Runtime sensors already attached. Detach first.",
+                        Sensors: GetStatusSnapshot()), JsonOpts);
+
+                _runtimeSensors = new SensorRegistry();
+                _runtimeSensors.Correlator.AddSink(new JsonLineSink(eventSink));
+
+                if (opts.EnableProfiler)
+                    _runtimeSensors.Add(new ProfilerSensor());
+                if (opts.EnableEtw)
+                    _runtimeSensors.Add(new EtwSensor());
+            }
+
+            var sensorOpts = new SensorOptions(
+                EditorPid: Environment.ProcessId,
+                Desired: opts.DesiredCapabilities,
+                PathAllowlist: opts.PathAllowlist,
+                CaptureStack: opts.CaptureStack);
+
+            _runtimeSensors.StartAllAsync(sensorOpts, CancellationToken.None)
+                .GetAwaiter().GetResult();
+
+            return JsonSerializer.Serialize(new RuntimeSensorAttachResult(
+                Attached: true,
+                Message: null,
+                Sensors: GetStatusSnapshot()), JsonOpts);
+        }
+        catch (Exception ex)
+        {
+            return JsonSerializer.Serialize(new RuntimeSensorAttachResult(
+                Attached: false,
+                Message: $"Attach failed: {ex.Message}",
+                Sensors: Array.Empty<SensorStatusInfo>()), JsonOpts);
+        }
+    }
+
+    /// <summary>Detach all running sensors.</summary>
+    public static string DetachRuntimeSensors()
+    {
+        SensorRegistry? registry;
+        lock (_runtimeLock) { registry = _runtimeSensors; _runtimeSensors = null; }
+        if (registry == null) return "{\"detached\":false,\"reason\":\"not attached\"}";
+
+        try { registry.StopAllAsync(CancellationToken.None).GetAwaiter().GetResult(); }
+        catch { }
+        try { registry.DisposeAsync().AsTask().GetAwaiter().GetResult(); }
+        catch { }
+        return "{\"detached\":true}";
+    }
+
+    /// <summary>Snapshot of every registered sensor's current state.</summary>
+    public static string GetSensorStatus()
+        => JsonSerializer.Serialize(GetStatusSnapshot(), JsonOpts);
+
+    static IReadOnlyList<SensorStatusInfo> GetStatusSnapshot()
+    {
+        var reg = _runtimeSensors;
+        if (reg == null) return Array.Empty<SensorStatusInfo>();
+        return reg.Sensors.Select(s => new SensorStatusInfo(
+            Id: s.Id,
+            Status: s.Status.ToString(),
+            Capabilities: (int)s.Capabilities,
+            LastError: s.LastError)).ToList();
+    }
+
+    public sealed record RuntimeSensorOptions(
+        bool EnableProfiler = true,
+        bool EnableEtw = false,
+        SensorCapabilities DesiredCapabilities = SensorCapabilities.ManagedCalls
+            | SensorCapabilities.DynamicCode
+            | SensorCapabilities.KernelFile
+            | SensorCapabilities.KernelProcess
+            | SensorCapabilities.KernelNetwork
+            | SensorCapabilities.NativeImageLoad,
+        bool CaptureStack = false,
+        IReadOnlyList<string>? PathAllowlist = null);
+
+    public sealed record RuntimeSensorAttachResult(
+        bool Attached,
+        string? Message,
+        IReadOnlyList<SensorStatusInfo> Sensors);
+
+    public sealed record SensorStatusInfo(
+        string Id,
+        string Status,
+        int Capabilities,
+        string? LastError);
 }

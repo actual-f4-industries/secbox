@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!--
+      Loaded by Secbox.Core inside an isolated AssemblyLoadContext, so all
+      transitive deps must be next to it. Same rationale as Secbox.Core.
+    -->
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Secbox.Sentinel.Contracts\Secbox.Sentinel.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>

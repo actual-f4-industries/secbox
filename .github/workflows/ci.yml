@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  DOTNET_VERSION: "10.0.x"
+
+jobs:
+  build:
+    name: Build & test (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore Secbox.slnx
+
+      - name: Build (no native profiler embed — CI build, not release)
+        env:
+          SECBOX_SKIP_DEVDROP: "1"
+        run: dotnet build Secbox.slnx -c Release --no-restore
+
+      - name: Test (managed only)
+        run: |
+          if (Test-Path tests) {
+            dotnet test Secbox.slnx -c Release --no-build --logger "trx;LogFileName=test-results.trx"
+          } else {
+            Write-Host "No tests/ directory yet — skipping"
+          }
+
+  build-profiler:
+    name: Build native profiler (sanity)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch CoreCLR headers
+        shell: pwsh
+        run: ./src/Secbox.Profiler/scripts/fetch-coreclr-headers.ps1
+      - name: Configure
+        run: cmake -S src/Secbox.Profiler -B src/Secbox.Profiler/build -A x64 -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build src/Secbox.Profiler/build --config Release

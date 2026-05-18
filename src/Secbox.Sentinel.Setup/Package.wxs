@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Secbox Sentinel installer (WiX v4).
+
+  Installs the Windows Service that performs ETW-based kernel monitoring on
+  behalf of the in-editor Secbox.Core client. Per-machine install under
+  Program Files. Service registered as "SecboxSentinel", runs as LocalSystem
+  (required for kernel ETW sessions), starts automatically with the OS.
+
+  The MSI is signed in CI when SignPath/Microsoft Trusted Signing creds are
+  configured; unsigned local builds work too, the user just sees a UAC red
+  banner instead of a blue one.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+
+  <Package Name="Secbox Sentinel"
+           Manufacturer="secbox"
+           Version="0.1.0.0"
+           UpgradeCode="d8a64db3-9a3f-4b1f-9d80-1b87f4d3a601"
+           Scope="perMachine">
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Secbox Sentinel is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      Files placed under Program Files\Secbox\Sentinel\. The harvested
+      fragment (Harvested.wxs, produced at build time from the publish
+      output) populates the SentinelComponents component group.
+    -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="SECBOX_ROOT" Name="Secbox">
+        <Directory Id="INSTALLFOLDER" Name="Sentinel" />
+      </Directory>
+    </StandardDirectory>
+
+    <!--
+      Service install. KeyPath via the service exe component (synthesized by
+      heat). The Service* elements live in a component co-installed with
+      the exe; we reference the harvested component group here.
+    -->
+    <Feature Id="Main" Title="Secbox Sentinel" Level="1">
+      <ComponentGroupRef Id="SentinelComponents" />
+      <ComponentRef Id="ServiceRegistration" />
+      <ComponentRef Id="EventLogRegistration" />
+    </Feature>
+
+    <!--
+      Service registration in a hand-authored component because harvested
+      components are file-only. KeyPath is a synthetic registry value so
+      the service install is keyed independently of the exe.
+    -->
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="ServiceRegistration" Guid="3e1d4a85-2f9c-4eb8-95a3-c97f0e842110" Win64="yes">
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\secbox\Sentinel"
+                       Name="InstalledVersion"
+                       Type="string"
+                       Value="!(bind.fileVersion.SecboxSentinel.exe)"
+                       KeyPath="yes" />
+
+        <ServiceInstall Id="SecboxSentinelService"
+                        Name="SecboxSentinel"
+                        DisplayName="Secbox Sentinel"
+                        Description="Kernel-level monitoring (file/process/network/registry) for the s&amp;box editor. Detection-only; all decisions stay in user-mode. Disable or uninstall from secbox in the editor."
+                        Type="ownProcess"
+                        Start="auto"
+                        ErrorControl="normal"
+                        Vital="yes"
+                        Account="LocalSystem">
+          <util:ServiceConfig FirstFailureActionType="restart"
+                              SecondFailureActionType="restart"
+                              ThirdFailureActionType="none"
+                              RestartServiceDelayInSeconds="10"
+                              ResetPeriodInDays="1" />
+        </ServiceInstall>
+
+        <ServiceControl Id="SecboxSentinelServiceControl"
+                        Name="SecboxSentinel"
+                        Start="install"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+      </Component>
+
+      <!--
+        Pre-create the Event Log source so the service's first
+        Microsoft.Extensions.Logging.EventLog emit doesn't trip the
+        "source does not exist" path that requires admin to fix.
+      -->
+      <Component Id="EventLogRegistration" Guid="b9c0e7a1-3d22-4ad9-9c1a-7e2f0b8f9112" Win64="yes">
+        <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\SecboxSentinel">
+          <RegistryValue Type="string"
+                         Name="EventMessageFile"
+                         Value="[NETFRAMEWORK40FULLINSTALLROOTDIR]EventLogMessages.dll" />
+          <RegistryValue Type="integer" Name="TypesSupported" Value="7" />
+        </RegistryKey>
+        <RegistryValue Root="HKLM"
+                       Key="SOFTWARE\secbox\Sentinel\EventLog"
+                       Name="Registered"
+                       Type="integer"
+                       Value="1"
+                       KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <!--
+      Reference the harvested exe by canonical id so the bind expression
+      above resolves. Heat generates id "SecboxSentinel.exe".
+    -->
+  </Package>
+
+</Wix>

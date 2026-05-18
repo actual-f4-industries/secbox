@@ -1,0 +1,319 @@
+name: Release
+
+# Triggered manually or by a v* tag push. Builds every artifact the bridge
+# needs, computes SHA-256s, optionally signs (only if signing secrets are
+# present — unsigned builds work and ship too), and attaches everything to
+# a GitHub Release.
+#
+# Manual SHA-256 hash sync into adapter source:
+#   1. Run this workflow on a tag (e.g. v0.1.0).
+#   2. Download the generated `hashes.txt` artifact from the release.
+#   3. Paste the values into CorePolicy.CoreFiles and ProfilerHashes.cs in
+#      the adapter project tree, then publish the adapter to the s&box
+#      library manager.
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label (e.g. v0.1.0)"
+        required: true
+        default: "v0.0.0-dev"
+
+permissions:
+  contents: write   # required for `gh release`
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  CONFIGURATION: "Release"
+  # Optional signing secret names — workflow detects presence at runtime and
+  # skips signing cleanly if absent.
+  SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+  SIGNPATH_ORG_ID: ${{ secrets.SIGNPATH_ORG_ID }}
+  SIGNPATH_PROJECT_SLUG: ${{ secrets.SIGNPATH_PROJECT_SLUG }}
+  SIGNPATH_SIGNING_POLICY: ${{ secrets.SIGNPATH_SIGNING_POLICY }}
+
+jobs:
+
+  # -------------------------------------------------------------------------
+  # 1. Build native CLR profiler (win-x64).
+  # -------------------------------------------------------------------------
+  build-profiler:
+    name: Build native profiler (win-x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch vendored CoreCLR headers
+        shell: pwsh
+        run: ./src/Secbox.Profiler/scripts/fetch-coreclr-headers.ps1
+
+      - name: Configure (CMake)
+        run: |
+          cmake -S src/Secbox.Profiler -B src/Secbox.Profiler/build `
+                -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build src/Secbox.Profiler/build --config Release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: secbox-profiler-win-x64
+          path: src/Secbox.Profiler/build/Release/secbox-profiler-win-x64.dll
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # 2. Build managed bridge stack (Secbox.Core + deps).
+  #    Embeds the profiler DLL into Secbox.Core resources.
+  # -------------------------------------------------------------------------
+  build-managed:
+    name: Build managed bridge (Secbox.Core)
+    runs-on: windows-latest
+    needs: [ build-profiler ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download profiler DLL
+        uses: actions/download-artifact@v4
+        with:
+          name: secbox-profiler-win-x64
+          path: src/Secbox.Core/Profiler/EmbeddedProfilerResources
+
+      - name: Restore
+        run: dotnet restore Secbox.slnx
+
+      - name: Build Secbox.Core (Release)
+        env:
+          SECBOX_SKIP_DEVDROP: "1"
+        run: |
+          dotnet build src/Secbox.Core/Secbox.Core.csproj `
+            -c ${{ env.CONFIGURATION }} `
+            -p:ContinuousIntegrationBuild=true `
+            --no-restore
+
+      - name: Stage bridge bundle
+        shell: pwsh
+        run: |
+          $bin = "src/Secbox.Core/bin/${{ env.CONFIGURATION }}/net10.0"
+          $stage = "dist/bridge"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $files = @(
+            "Secbox.Core.dll",
+            "Secbox.Contracts.dll",
+            "Secbox.Rules.dll",
+            "Secbox.Scanner.dll",
+            "Secbox.Sentinel.Contracts.dll",
+            "Secbox.Sentinel.Client.dll",
+            "Mono.Cecil.dll",
+            "Microsoft.Diagnostics.NETCore.Client.dll"
+          )
+          foreach ($f in $files) {
+            $src = Join-Path $bin $f
+            if (Test-Path $src) { Copy-Item $src $stage -Force }
+          }
+          Get-ChildItem $stage | ForEach-Object {
+            Write-Host "$($_.Name)  $((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())"
+          }
+
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bridge-bundle
+          path: dist/bridge/**
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # 3. Publish Sentinel service (self-contained win-x64).
+  # -------------------------------------------------------------------------
+  publish-sentinel:
+    name: Publish Sentinel service
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Publish
+        run: |
+          dotnet publish src/Secbox.Sentinel.Service/Secbox.Sentinel.Service.csproj `
+            -c ${{ env.CONFIGURATION }} `
+            -r win-x64 --self-contained true `
+            -p:PublishSingleFile=false -p:PublishTrimmed=false
+
+      - name: Upload publish dir
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-publish
+          path: src/Secbox.Sentinel.Service/bin/${{ env.CONFIGURATION }}/net10.0-windows/win-x64/publish/**
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # 4. Build Sentinel installer MSI (WiX v4).
+  # -------------------------------------------------------------------------
+  build-installer:
+    name: Build Sentinel MSI (WiX v4)
+    runs-on: windows-latest
+    needs: [ publish-sentinel ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Download Sentinel publish output
+        uses: actions/download-artifact@v4
+        with:
+          name: sentinel-publish
+          path: sentinel-publish
+
+      - name: Build MSI
+        env:
+          HarvestFolder: ${{ github.workspace }}\sentinel-publish
+        run: |
+          dotnet build src/Secbox.Sentinel.Setup/Secbox.Sentinel.Setup.wixproj `
+            -c ${{ env.CONFIGURATION }}
+
+      - name: Stage MSI
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/installer | Out-Null
+          Copy-Item src/Secbox.Sentinel.Setup/bin/${{ env.CONFIGURATION }}/*.msi dist/installer/SecboxSentinel.msi -Force
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-msi
+          path: dist/installer/SecboxSentinel.msi
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # 5. (Optional) sign everything that can be signed. Skipped if secrets
+  #    aren't configured.
+  # -------------------------------------------------------------------------
+  sign:
+    name: Sign artifacts (optional)
+    runs-on: windows-latest
+    needs: [ build-managed, build-profiler, build-installer ]
+    if: ${{ env.SIGNPATH_API_TOKEN != '' && env.SIGNPATH_PROJECT_SLUG != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bridge bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: bridge-bundle
+          path: signing-input/bridge
+      - name: Download profiler
+        uses: actions/download-artifact@v4
+        with:
+          name: secbox-profiler-win-x64
+          path: signing-input/profiler
+      - name: Download MSI
+        uses: actions/download-artifact@v4
+        with:
+          name: sentinel-msi
+          path: signing-input/installer
+
+      - name: Submit to SignPath
+        uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ env.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ env.SIGNPATH_ORG_ID }}
+          project-slug: ${{ env.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ env.SIGNPATH_SIGNING_POLICY }}
+          artifact-configuration-slug: secbox-release-bundle
+          github-artifact-id: signing-input
+          wait-for-completion: true
+          output-artifact-directory: signing-output
+
+      - name: Upload signed artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-artifacts
+          path: signing-output/**
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------------
+  # 6. Compute hashes + create GitHub Release with everything attached.
+  # -------------------------------------------------------------------------
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [ build-managed, build-profiler, build-installer, sign ]
+    # `sign` is allowed to be skipped (no secrets). Don't gate on it.
+    if: always() && !cancelled() && (needs.build-managed.result == 'success' && needs.build-profiler.result == 'success' && needs.build-installer.result == 'success')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Determine version label
+        id: ver
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "label=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "label=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Stage release files
+        run: |
+          mkdir -p release
+          # Prefer signed/, fall back to unsigned bundles.
+          if [ -d "artifacts/signed-artifacts" ]; then
+            cp -r artifacts/signed-artifacts/* release/
+          else
+            cp artifacts/bridge-bundle/* release/
+            cp artifacts/secbox-profiler-win-x64/secbox-profiler-win-x64.dll release/
+            cp artifacts/sentinel-msi/SecboxSentinel.msi release/
+          fi
+          echo "::group::Release contents"
+          ls -la release/
+          echo "::endgroup::"
+
+      - name: Compute SHA-256 manifest
+        run: |
+          cd release
+          : > hashes.txt
+          for f in $(ls -1 | grep -v '^hashes\.txt$' | sort); do
+            sha=$(sha256sum "$f" | awk '{print $1}')
+            printf "%s  %s\n" "$sha" "$f" | tee -a hashes.txt
+          done
+
+      - name: Create / update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.ver.outputs.label }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" release/* --clobber
+          else
+            gh release create "$tag" release/* \
+              --title "secbox $tag" \
+              --notes "Bridge bundle (Secbox.Core + deps), native CLR profiler (Tier B), and Sentinel installer (Tier A).
+
+The s&box adapter (\`secbox.editor\`) downloads these assets at runtime from
+\`https://github.com/actual-f4-industries/secbox/releases/download/${tag}/<file>\`,
+verifies each blob's SHA-256 against the value pinned in \`CorePolicy.CoreFiles\`,
+then loads \`Secbox.Core.dll\` into an isolated AssemblyLoadContext.
+
+\`hashes.txt\` lists the SHA-256 of every artifact. Paste those values into
+\`CorePolicy.CoreFiles\` and \`ProfilerHashes.cs\` in the adapter, then bump
+\`CorePolicy.CoreVersion\` to \`${tag}\` and re-publish the adapter."
+          fi
