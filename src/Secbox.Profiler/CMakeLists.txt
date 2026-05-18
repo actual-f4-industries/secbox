@@ -5,6 +5,14 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# Static CRT linkage (/MT, /MTd). Default MSVC is dynamic CRT (/MD) which
+# requires vcruntime140.dll + msvcp140.dll from the Visual C++ Redistributable
+# on the target machine. That's not bundled by the .NET runtime and not a
+# given on every user's box — missing CRT manifests as 0x8007007E "Unable
+# to load DLL or one of its dependencies" when the profiler P/Invokes fire.
+# Static linkage bundles the CRT into our DLL (adds ~150KB).
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 # ---------------------------------------------------------------------------
 # CoreCLR profiler API headers.
 #
@@ -61,6 +69,7 @@ set_target_properties(secbox_profiler PROPERTIES
     OUTPUT_NAME "${SECBOX_PROFILER_OUTPUT_NAME}"
     PREFIX ""
     DEFINE_SYMBOL "SECBOX_PROFILER_EXPORTS"
+    MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
 )
 
 if(WIN32)
