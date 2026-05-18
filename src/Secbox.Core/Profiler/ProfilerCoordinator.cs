@@ -56,20 +56,39 @@ public static class ProfilerCoordinator
     // bridge that gap on its own. SetDllImportResolver redirects every
     // P/Invoke against NativeLibName to LoadLibrary(absolute cached path).
     //
-    // CoreCLR allows one resolver per (Assembly, name) pair, so this is
-    // gated on _resolverRegistered to avoid the second-call exception.
+    // CoreCLR allows one resolver per Assembly, so we gate on the local
+    // flag AND swallow InvalidOperationException — the latter handles
+    // edge cases like:
+    //   - The s&box adapter triggered a Core hot-reload; the previous
+    //     Core's Assembly is still in the runtime's resolver table even
+    //     though our static state was reset.
+    //   - Someone else (a profiling tool, another library) already
+    //     registered a resolver against this Assembly.
+    // In both cases the existing resolver references the SAME static
+    // _resolvedPath via the captured closure (since it's the same Core
+    // load), or — if it's a foreign resolver — the downstream P/Invoke
+    // will fail with DllNotFoundException, which carries a clearer cause
+    // than this "resolver already set" message.
     static void RegisterDllImportResolverOnce()
     {
         if (_resolverRegistered) return;
-        NativeLibrary.SetDllImportResolver(
-            typeof(ProfilerCoordinator).Assembly,
-            static (libraryName, _, _) =>
-            {
-                if (libraryName != NativeLibName) return IntPtr.Zero;
-                var p = _resolvedPath;
-                if (string.IsNullOrEmpty(p)) return IntPtr.Zero;
-                return NativeLibrary.TryLoad(p, out var handle) ? handle : IntPtr.Zero;
-            });
+        try
+        {
+            NativeLibrary.SetDllImportResolver(
+                typeof(ProfilerCoordinator).Assembly,
+                static (libraryName, _, _) =>
+                {
+                    if (libraryName != NativeLibName) return IntPtr.Zero;
+                    var p = _resolvedPath;
+                    if (string.IsNullOrEmpty(p)) return IntPtr.Zero;
+                    return NativeLibrary.TryLoad(p, out var handle) ? handle : IntPtr.Zero;
+                });
+        }
+        catch (InvalidOperationException)
+        {
+            // Resolver already set for this assembly — accept and move on.
+            // See block comment above for the reasoning.
+        }
         _resolverRegistered = true;
     }
 
