@@ -7,10 +7,12 @@ using Secbox.Core.Profiler;
 namespace Secbox.Core.RuntimeSensors.Sensors;
 
 // Tier B sensor — wraps the native Secbox.Profiler. Responsible for:
-//   1. Telling ProfilerCoordinator to extract + attach the profiler DLL.
-//   2. Registering the managed callback via P/Invoke.
-//   3. Translating the native JSON payloads into SensorEvents on the
-//      registry channel.
+//   1. Telling ProfilerCoordinator to attach the native profiler.
+//   2. Registering the managed callback via the explicit function pointer
+//      ProfilerCoordinator exposes (NOT via [DllImport] / P/Invoke — see
+//      ProfilerCoordinator block comment for why).
+//   3. Translating native JSON payloads into SensorEvents on the registry
+//      channel.
 //
 // The native callback fires on whatever runtime thread triggered the event
 // (load thread, JIT thread, exception thread). We do bounded work in the
@@ -25,6 +27,18 @@ public sealed class ProfilerSensor : ISensor
     public SensorStatus Status { get; private set; } = SensorStatus.Disabled;
     public string? LastError { get; private set; }
 
+    // Native signature: void STDMETHODCALLTYPE (*)(int kind, const wchar_t* payload)
+    unsafe delegate* unmanaged[Stdcall]<int, char*, void> NativeCallbackPtr =>
+        &NativeCallback;
+
+    // Native signature: void STDMETHODCALLTYPE Secbox_RegisterCallback(void* cb)
+    unsafe delegate* unmanaged[Stdcall]<nint, void> RegisterCallbackThunk =>
+        (delegate* unmanaged[Stdcall]<nint, void>)ProfilerCoordinator.RegisterCallbackFn;
+
+    // Native signature: void STDMETHODCALLTYPE Secbox_DrainRing()
+    unsafe delegate* unmanaged[Stdcall]<void> DrainRingThunk =>
+        (delegate* unmanaged[Stdcall]<void>)ProfilerCoordinator.DrainRingFn;
+
     static ChannelWriter<SensorEvent>? _sink;
     static long _sequence;
 
@@ -34,46 +48,50 @@ public sealed class ProfilerSensor : ISensor
         try
         {
             await ProfilerCoordinator.EnsureAttachedAsync(ct).ConfigureAwait(false);
+
+            if (ProfilerCoordinator.RegisterCallbackFn == IntPtr.Zero)
+            {
+                LastError = "Profiler attached but Secbox_RegisterCallback export not bound.";
+                Status = SensorStatus.Failed;
+                return;
+            }
+
             _sink = sink;
+
             unsafe
             {
-                Secbox_RegisterCallback((nint)(delegate* unmanaged[Stdcall]<int, char*, void>)&NativeCallback);
+                var cb = (nint)NativeCallbackPtr;
+                RegisterCallbackThunk(cb);
+                if (ProfilerCoordinator.DrainRingFn != IntPtr.Zero)
+                    DrainRingThunk();
             }
-            Secbox_DrainRing(); // catch up on events fired before our callback registered
+
             Status = SensorStatus.Healthy;
-        }
-        catch (DllNotFoundException ex)
-        {
-            LastError = $"profiler DLL not loadable: {ex.Message}";
-            Status = SensorStatus.Failed;
         }
         catch (Exception ex)
         {
-            LastError = ex.Message;
+            LastError = $"{ex.GetType().Name}: {ex.Message}";
             Status = SensorStatus.Failed;
         }
     }
 
     public Task StopAsync(CancellationToken ct)
     {
-        try { Secbox_RegisterCallback(0); } catch { }
+        try
+        {
+            unsafe
+            {
+                if (ProfilerCoordinator.RegisterCallbackFn != IntPtr.Zero)
+                    RegisterCallbackThunk(IntPtr.Zero);   // unregister
+            }
+        }
+        catch { }
         _sink = null;
         Status = SensorStatus.Disabled;
         return Task.CompletedTask;
     }
 
-    // P/Invoke surface — the native DLL is loaded by ProfilerCoordinator
-    // before this gets called.
-    [DllImport(ProfilerCoordinator.NativeLibName, CallingConvention = CallingConvention.StdCall)]
-    static extern void Secbox_RegisterCallback(nint callback);
-
-    [DllImport(ProfilerCoordinator.NativeLibName, CallingConvention = CallingConvention.StdCall)]
-    static extern int Secbox_GetStatus();
-
-    [DllImport(ProfilerCoordinator.NativeLibName, CallingConvention = CallingConvention.StdCall)]
-    static extern void Secbox_DrainRing();
-
-    [UnmanagedCallersOnly(CallConvs = new[] { typeof(System.Runtime.CompilerServices.CallConvStdcall) })]
+    [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvStdcall) })]
     static unsafe void NativeCallback(int kind, char* payloadJson)
     {
         try
@@ -131,7 +149,15 @@ public sealed class ProfilerSensor : ISensor
 
     public ValueTask DisposeAsync()
     {
-        try { Secbox_RegisterCallback(0); } catch { }
+        try
+        {
+            unsafe
+            {
+                if (ProfilerCoordinator.RegisterCallbackFn != IntPtr.Zero)
+                    RegisterCallbackThunk(IntPtr.Zero);
+            }
+        }
+        catch { }
         return ValueTask.CompletedTask;
     }
 }

@@ -5,22 +5,27 @@ using Microsoft.Diagnostics.NETCore.Client;
 namespace Secbox.Core.Profiler;
 
 // Locates the native profiler binary in the bridge cache folder beside
-// this assembly, then attaches it via DiagnosticsClient.
+// this assembly, attaches it via DiagnosticsClient, then resolves its
+// exported function pointers via NativeLibrary so ProfilerSensor can call
+// them WITHOUT P/Invoke + DllImport.
+//
+// Why no P/Invoke / SetDllImportResolver: the resolver-based path is
+// fragile across AssemblyLoadContext reloads — the runtime caches the
+// resolver registration in a ConditionalWeakTable keyed on Assembly, and
+// in practice the table can end up holding entries that don't fire for
+// our reloaded Core. The symptom is exactly what we hit: SetDllImportResolver
+// throws "A resolver is already set", but the lookup at P/Invoke time
+// doesn't actually invoke our resolver, falling back to default lookup
+// against "secbox-profiler.dll" which doesn't exist (file is named
+// secbox-profiler-win-x64.dll). Function-pointer binding sidesteps all
+// of that — we LoadLibrary the absolute path ourselves and GetExport
+// every symbol we need.
 //
 // SHA-256 verification of the profiler DLL is done by the s&box adapter
-// (CorePolicy.CoreFiles[secbox-profiler-win-x64.dll] in the adapter source)
-// — that's the trust anchor for the bridge bundle. Core does not re-verify:
-// the adapter is the entity that owns the pinned hashes and refuses to
-// write any mismatched blob to the cache. Re-verifying here would only
-// duplicate the check against a potentially-compromised hash constant
-// inside Core itself.
-//
-// Idempotent — calling EnsureAttachedAsync twice is a no-op after the
-// first successful attach.
+// (CorePolicy.CoreFiles in the adapter source) — that's the trust anchor
+// for the bridge bundle. Core does not re-verify.
 public static class ProfilerCoordinator
 {
-    // P/Invoke LibName — runtime resolves "secbox-profiler" against the
-    // cache folder where this assembly was loaded from (same folder).
     public const string NativeLibName = "secbox-profiler";
 
     // {53C5B321-7B0E-4F8B-A3D9-5EC5B0A3F101} — mirror of the native CLSID.
@@ -28,11 +33,19 @@ public static class ProfilerCoordinator
 
     static readonly SemaphoreSlim _initLock = new(1, 1);
     static bool _attached;
-    static bool _resolverRegistered;
     static string? _resolvedPath;
+    static IntPtr _moduleHandle;
+    static IntPtr _fpRegisterCallback;
+    static IntPtr _fpDrainRing;
+    static IntPtr _fpGetStatus;
 
     public static bool IsAttached => _attached;
     public static string? AttachedPath => _resolvedPath;
+
+    // Exported function pointers. Null until EnsureAttachedAsync completes.
+    public static IntPtr RegisterCallbackFn => _fpRegisterCallback;
+    public static IntPtr DrainRingFn => _fpDrainRing;
+    public static IntPtr GetStatusFn => _fpGetStatus;
 
     public static async Task EnsureAttachedAsync(CancellationToken ct)
     {
@@ -45,8 +58,8 @@ public static class ProfilerCoordinator
             var path = LocateProfilerBinary();
             Diag($"EnsureAttachedAsync: located profiler at '{path}', size={new FileInfo(path).Length:N0} bytes");
             _resolvedPath = path;
-            RegisterDllImportResolverOnce();
             await AttachAsync(path, ct).ConfigureAwait(false);
+            BindFunctionPointers(path);
             _attached = true;
             Diag("EnsureAttachedAsync: complete (attached=true)");
         }
@@ -56,78 +69,6 @@ public static class ProfilerCoordinator
             throw;
         }
         finally { _initLock.Release(); }
-    }
-
-    // ProfilerSensor's P/Invokes reference NativeLibName ("secbox-profiler"),
-    // but the actual file on disk is "secbox-profiler-win-x64.dll" — the
-    // platform suffix has to live in the filename so future cross-platform
-    // builds can ship side-by-side. The loader's name-based lookup won't
-    // bridge that gap on its own. SetDllImportResolver redirects every
-    // P/Invoke against NativeLibName to LoadLibrary(absolute cached path).
-    //
-    // CoreCLR allows one resolver per Assembly, so we gate on the local
-    // flag AND swallow InvalidOperationException — the latter handles
-    // edge cases like:
-    //   - The s&box adapter triggered a Core hot-reload; the previous
-    //     Core's Assembly is still in the runtime's resolver table even
-    //     though our static state was reset.
-    //   - Someone else (a profiling tool, another library) already
-    //     registered a resolver against this Assembly.
-    // In both cases the existing resolver references the SAME static
-    // _resolvedPath via the captured closure (since it's the same Core
-    // load), or — if it's a foreign resolver — the downstream P/Invoke
-    // will fail with DllNotFoundException, which carries a clearer cause
-    // than this "resolver already set" message.
-    static void RegisterDllImportResolverOnce()
-    {
-        if (_resolverRegistered) return;
-        try
-        {
-            NativeLibrary.SetDllImportResolver(
-                typeof(ProfilerCoordinator).Assembly,
-                static (libraryName, _, _) =>
-                {
-                    Diag($"resolver: invoked for libraryName='{libraryName}'");
-                    if (libraryName != NativeLibName)
-                    {
-                        Diag($"resolver: name mismatch (expected '{NativeLibName}'), returning Zero");
-                        return IntPtr.Zero;
-                    }
-                    var p = _resolvedPath;
-                    if (string.IsNullOrEmpty(p))
-                    {
-                        Diag("resolver: _resolvedPath is empty, returning Zero");
-                        return IntPtr.Zero;
-                    }
-                    if (!File.Exists(p))
-                    {
-                        Diag($"resolver: file missing at '{p}', returning Zero");
-                        return IntPtr.Zero;
-                    }
-                    try
-                    {
-                        var handle = NativeLibrary.Load(p);
-                        Diag($"resolver: NativeLibrary.Load OK for '{p}', handle=0x{handle.ToInt64():x}");
-                        return handle;
-                    }
-                    catch (Exception ex)
-                    {
-                        Diag($"resolver: NativeLibrary.Load THREW {ex.GetType().Name}: {ex.Message}");
-                        return IntPtr.Zero;
-                    }
-                });
-            Diag("RegisterDllImportResolverOnce: SetDllImportResolver succeeded");
-        }
-        catch (InvalidOperationException ex)
-        {
-            Diag($"RegisterDllImportResolverOnce: caught InvalidOperationException ({ex.Message}) — assuming existing resolver is ours");
-        }
-        catch (Exception ex)
-        {
-            Diag($"RegisterDllImportResolverOnce: THREW {ex.GetType().Name}: {ex.Message}");
-            throw;
-        }
-        _resolverRegistered = true;
     }
 
     static string LocateProfilerBinary()
@@ -141,10 +82,12 @@ public static class ProfilerCoordinator
         }
 
         const string fileName = "secbox-profiler-win-x64.dll";
-        var coreDir = Path.GetDirectoryName(typeof(ProfilerCoordinator).Assembly.Location)
-            ?? throw new InvalidOperationException(
-                "Could not resolve Secbox.Core assembly directory — profiler lookup failed.");
+        var asmLocation = typeof(ProfilerCoordinator).Assembly.Location;
+        if (string.IsNullOrEmpty(asmLocation))
+            throw new InvalidOperationException(
+                "Secbox.Core's Assembly.Location is empty — cannot resolve profiler path.");
 
+        var coreDir = Path.GetDirectoryName(asmLocation)!;
         var profilerPath = Path.Combine(coreDir, fileName);
         if (!File.Exists(profilerPath))
         {
@@ -159,15 +102,39 @@ public static class ProfilerCoordinator
         return profilerPath;
     }
 
+    // Loads the native profiler (returns the existing CLR-loaded handle on
+    // Windows because the OS de-duplicates LoadLibrary by absolute path)
+    // and resolves the three exported function pointers ProfilerSensor uses.
+    static void BindFunctionPointers(string profilerPath)
+    {
+        Diag("BindFunctionPointers: begin");
+        try
+        {
+            _moduleHandle = NativeLibrary.Load(profilerPath);
+            Diag($"BindFunctionPointers: NativeLibrary.Load handle=0x{_moduleHandle.ToInt64():x}");
+
+            _fpRegisterCallback = NativeLibrary.GetExport(_moduleHandle, "Secbox_RegisterCallback");
+            _fpDrainRing        = NativeLibrary.GetExport(_moduleHandle, "Secbox_DrainRing");
+            _fpGetStatus        = NativeLibrary.GetExport(_moduleHandle, "Secbox_GetStatus");
+
+            Diag($"BindFunctionPointers: exports resolved " +
+                 $"RegisterCallback=0x{_fpRegisterCallback.ToInt64():x} " +
+                 $"DrainRing=0x{_fpDrainRing.ToInt64():x} " +
+                 $"GetStatus=0x{_fpGetStatus.ToInt64():x}");
+        }
+        catch (Exception ex)
+        {
+            Diag($"BindFunctionPointers: THREW {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
+    }
+
     static async Task AttachAsync(string profilerPath, CancellationToken ct)
     {
         Diag($"AttachAsync: begin pid={Environment.ProcessId} path='{profilerPath}'");
         var client = new DiagnosticsClient(Environment.ProcessId);
         try
         {
-            // Synchronous under the hood; wrap with Task.Run to keep our
-            // ConfigureAwait(false) story clean and to surface OperationCanceled
-            // promptly if the caller cancels.
             await Task.Run(() =>
                 client.AttachProfiler(
                     attachTimeout: TimeSpan.FromSeconds(10),
@@ -177,7 +144,6 @@ public static class ProfilerCoordinator
         }
         catch (ServerErrorException ex) when (ex.Message.Contains("0x8013136A", StringComparison.OrdinalIgnoreCase))
         {
-            // CORPROF_E_PROFILER_ALREADY_ACTIVE — another profiler attached first.
             Diag("AttachAsync: another profiler already attached (CORPROF_E_PROFILER_ALREADY_ACTIVE)");
             throw new InvalidOperationException(
                 "Another CLR profiler is already attached to this editor process. " +
@@ -191,8 +157,6 @@ public static class ProfilerCoordinator
     }
 
     // Diagnostic sink — writes to %LOCALAPPDATA%/secbox/profiler-diag.log.
-    // This is a debug aid for tracing why Tier B attach fails on a user
-    // machine; intentionally simple, no rotation, swallows all errors.
     // Path is OUTSIDE the per-version cache folder so it survives reloads.
     static readonly object _diagLock = new();
     public static string DiagLogPath =>
