@@ -35,13 +35,12 @@
 
     <Feature Id="Main" Title="Secbox Sentinel" Level="1">
       <!--
-        WiX v4 <Files> auto-creates one Component per file matching the
-        pattern. Directory attribute roots them at INSTALLFOLDER (defined
-        below in StandardDirectory). Replaces the WiX v3 heat harvest path.
-        Note: in WiX 4.0.x the <Files> element is valid as a direct child
-        of <Feature> but NOT inside <ComponentGroup>.
+        SentinelComponents is produced at build time by the wixproj's
+        <HarvestFiles> item — one component per file under $(HarvestFolder),
+        all rooted at INSTALLFOLDER. The auto-generated fragment lands in
+        obj/Release/ and is compiled into the package transparently.
       -->
-      <Files Directory="INSTALLFOLDER" Include="$(var.HarvestFolder)\**" />
+      <ComponentGroupRef Id="SentinelComponents" />
       <ComponentRef Id="ServiceRegistration" />
       <ComponentRef Id="EventLogRegistration" />
     </Feature>

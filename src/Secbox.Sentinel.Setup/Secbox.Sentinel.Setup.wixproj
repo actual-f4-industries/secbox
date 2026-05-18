@@ -11,17 +11,28 @@
       on this project. Local: set HarvestFolder=...\publish to test.
     -->
     <HarvestFolder Condition="'$(HarvestFolder)' == ''">..\Secbox.Sentinel.Service\bin\Release\net10.0-windows\win-x64\publish</HarvestFolder>
-
-    <!--
-      Pass HarvestFolder to the WiX preprocessor so Package.wxs's
-      <Files Include="$(var.HarvestFolder)\**" /> resolves. WiX v4 reads
-      DefineConstants and exposes each entry as $(var.NAME).
-    -->
-    <DefineConstants>HarvestFolder=$(HarvestFolder)</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="WixToolset.Util.wixext" Version="4.0.5" />
+  </ItemGroup>
+
+  <!--
+    WiX v4 SDK's built-in harvest. Walks $(HarvestFolder) at build time and
+    generates components into a ComponentGroup named SentinelComponents,
+    rooted at the INSTALLFOLDER directory. Package.wxs references that
+    group via <ComponentGroupRef Id="SentinelComponents" />.
+
+    This replaces both the v3 heat invocation and the schema-restricted
+    <Files> element — HarvestFiles is the supported v4 way to bundle a
+    publish output without hand-authoring 150 File elements.
+  -->
+  <ItemGroup>
+    <HarvestFiles Include="$(HarvestFolder)\**">
+      <ComponentGroupName>SentinelComponents</ComponentGroupName>
+      <DirectoryRefId>INSTALLFOLDER</DirectoryRefId>
+      <SourceBase>$(HarvestFolder)</SourceBase>
+    </HarvestFiles>
   </ItemGroup>
 
 </Project>
