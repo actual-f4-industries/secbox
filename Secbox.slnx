@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Secbox.Cli/Secbox.Cli.csproj" />
+    <Project Path="src/Secbox.Contracts/Secbox.Contracts.csproj" />
+    <Project Path="src/Secbox.Core/Secbox.Core.csproj" />
+    <Project Path="src/Secbox.Rules/Secbox.Rules.csproj" />
+    <Project Path="src/Secbox.Scanner/Secbox.Scanner.csproj" />
+  </Folder>
+</Solution>

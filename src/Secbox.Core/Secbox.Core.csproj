@@ -1,0 +1,45 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+        <!--
+            Class libraries don't normally copy NuGet dependencies into bin.
+            Secbox.Core is the ship target (loaded by the editor adapter via
+            AssemblyLoadContext), so we need every dep beside it.
+        -->
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <ProjectReference Include="..\Secbox.Contracts\Secbox.Contracts.csproj" />
+        <ProjectReference Include="..\Secbox.Rules\Secbox.Rules.csproj" />
+        <ProjectReference Include="..\Secbox.Scanner\Secbox.Scanner.csproj" />
+    </ItemGroup>
+
+    <!--
+        After every build, copy the output DLLs into %LOCALAPPDATA%\secbox\core\dev
+        so the s&box editor adapter (when dev mode is toggled on via
+        secbox > Dev Mode > Toggle) picks them up without any extra steps.
+
+        Skipped if SECBOX_SKIP_DEVDROP=1 in the environment (for CI / release builds).
+    -->
+    <Target Name="CopyToSecboxDevDrop"
+            AfterTargets="Build"
+            Condition="'$(SECBOX_SKIP_DEVDROP)' != '1' AND '$(OS)' == 'Windows_NT'">
+        <PropertyGroup>
+            <SecboxDevDropPath>$(LOCALAPPDATA)\secbox\core\dev</SecboxDevDropPath>
+        </PropertyGroup>
+        <MakeDir Directories="$(SecboxDevDropPath)" />
+        <ItemGroup>
+            <SecboxDevDropFiles Include="$(OutputPath)*.dll" />
+            <SecboxDevDropFiles Include="$(OutputPath)*.pdb" />
+        </ItemGroup>
+        <Copy SourceFiles="@(SecboxDevDropFiles)"
+              DestinationFolder="$(SecboxDevDropPath)"
+              SkipUnchangedFiles="true" />
+        <Message Importance="high" Text="secbox dev-drop: copied $(SecboxDevDropFiles->Count()) files to $(SecboxDevDropPath)" />
+    </Target>
+
+</Project>
