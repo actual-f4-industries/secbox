@@ -67,12 +67,15 @@ jobs:
 
   # -------------------------------------------------------------------------
   # 2. Build managed bridge stack (Secbox.Core + deps).
-  #    Embeds the profiler DLL into Secbox.Core resources.
+  #    The profiler DLL ships as a separate release asset; the adapter
+  #    downloads + SHA-256-verifies it (CorePolicy.CoreFiles) and drops it
+  #    next to Secbox.Core.dll. Core itself no longer embeds it, so this
+  #    job no longer needs build-profiler as a dependency — both can run
+  #    in parallel.
   # -------------------------------------------------------------------------
   build-managed:
     name: Build managed bridge (Secbox.Core)
     runs-on: windows-latest
-    needs: [ build-profiler ]
     steps:
       - uses: actions/checkout@v4
 
@@ -80,12 +83,6 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Download profiler DLL
-        uses: actions/download-artifact@v4
-        with:
-          name: secbox-profiler-win-x64
-          path: src/Secbox.Core/Profiler/EmbeddedProfilerResources
 
       - name: Restore
         run: dotnet restore Secbox.slnx

@@ -34,19 +34,18 @@
         <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.553101" />
     </ItemGroup>
 
-    <ItemGroup>
-        <!--
-            Native profiler binaries are embedded as resources so the editor
-            adapter doesn't need a second download. Manifest path matches
-            ProfilerCoordinator.SelectPlatformResource(). Files missing from
-            disk at build time are simply not embedded — the runtime check
-            in ProfilerCoordinator.ExtractAndVerify throws a clear error.
-        -->
-        <EmbeddedResource Include="Profiler\EmbeddedProfilerResources\secbox-profiler-win-x64.dll"
-                          Condition="Exists('Profiler\EmbeddedProfilerResources\secbox-profiler-win-x64.dll')">
-            <LogicalName>Secbox.Core.Profiler.EmbeddedProfilerResources.secbox-profiler-win-x64.dll</LogicalName>
-        </EmbeddedResource>
-    </ItemGroup>
+    <!--
+        Native profiler is no longer embedded in Secbox.Core. The s&box
+        adapter downloads secbox-profiler-win-x64.dll as a regular bridge
+        bundle file (pinned in CorePolicy.CoreFiles), SHA-256-verifies it
+        against the adapter's pin, and drops it next to Secbox.Core.dll in
+        the cache folder. ProfilerCoordinator.LocateProfilerBinary reads
+        it from there at attach time.
+
+        This puts the trust anchor for ALL downloaded files — managed and
+        native — in one place (the adapter), avoiding the need to re-verify
+        hashes against constants compiled into the downloaded core.
+    -->
 
     <!--
         After every build, copy the output DLLs into %LOCALAPPDATA%\secbox\core\dev

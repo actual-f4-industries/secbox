@@ -1,24 +1,25 @@
-using System.Reflection;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using Microsoft.Diagnostics.NETCore.Client;
 
 namespace Secbox.Core.Profiler;
 
-// Owns the lifecycle of the native profiler:
-//   1. Extracts the platform-appropriate native binary from this assembly's
-//      embedded resources to a per-user cache.
-//   2. Verifies its SHA-256 against ProfilerHashes.
-//   3. Asks the runtime to attach it via DiagnosticsClient.AttachProfiler.
-//   4. Returns the resolved cache path so the P/Invoke loader can find it.
+// Locates the native profiler binary in the bridge cache folder beside
+// this assembly, then attaches it via DiagnosticsClient.
 //
-// Idempotent — calling EnsureAttachedAsync twice is a no-op after the first
-// successful attach.
+// SHA-256 verification of the profiler DLL is done by the s&box adapter
+// (CorePolicy.CoreFiles[secbox-profiler-win-x64.dll] in the adapter source)
+// — that's the trust anchor for the bridge bundle. Core does not re-verify:
+// the adapter is the entity that owns the pinned hashes and refuses to
+// write any mismatched blob to the cache. Re-verifying here would only
+// duplicate the check against a potentially-compromised hash constant
+// inside Core itself.
+//
+// Idempotent — calling EnsureAttachedAsync twice is a no-op after the
+// first successful attach.
 public static class ProfilerCoordinator
 {
-    // P/Invoke LibName — the runtime resolves "secbox-profiler" through the
-    // platform DLL search rules. We help by AssemblyLoadContext-loading the
-    // native binary from our cache before any P/Invoke fires; see Attach.
+    // P/Invoke LibName — runtime resolves "secbox-profiler" against the
+    // cache folder where this assembly was loaded from (same folder).
     public const string NativeLibName = "secbox-profiler";
 
     // {53C5B321-7B0E-4F8B-A3D9-5EC5B0A3F101} — mirror of the native CLSID.
@@ -38,7 +39,7 @@ public static class ProfilerCoordinator
         try
         {
             if (_attached) return;
-            var path = ExtractAndVerify();
+            var path = LocateProfilerBinary();
             await AttachAsync(path, ct).ConfigureAwait(false);
             _resolvedPath = path;
             _attached = true;
@@ -46,62 +47,33 @@ public static class ProfilerCoordinator
         finally { _initLock.Release(); }
     }
 
-    static string ExtractAndVerify()
+    static string LocateProfilerBinary()
     {
-        var (resourceName, expectedHash, fileName) = SelectPlatformResource();
-        var asm = typeof(ProfilerCoordinator).Assembly;
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            || RuntimeInformation.OSArchitecture != Architecture.X64)
+        {
+            throw new PlatformNotSupportedException(
+                $"Profiler (Tier B) not available on {RuntimeInformation.OSDescription} " +
+                $"{RuntimeInformation.OSArchitecture}. Only win-x64 is shipped today.");
+        }
 
-        using var stream = asm.GetManifestResourceStream(resourceName)
+        const string fileName = "secbox-profiler-win-x64.dll";
+        var coreDir = Path.GetDirectoryName(typeof(ProfilerCoordinator).Assembly.Location)
             ?? throw new InvalidOperationException(
-                $"Embedded profiler resource missing: {resourceName}. " +
-                "Build pipeline did not bundle the native blob.");
+                "Could not resolve Secbox.Core assembly directory — profiler lookup failed.");
 
-        var cacheDir = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "secbox", "profiler",
-            asm.GetName().Version?.ToString() ?? "dev");
-        Directory.CreateDirectory(cacheDir);
-
-        var cachePath = Path.Combine(cacheDir, fileName);
-        byte[] bytes;
-        using (var ms = new MemoryStream()) { stream.CopyTo(ms); bytes = ms.ToArray(); }
-
-        var actualHash = Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
-        if (!expectedHash.Equals(actualHash, StringComparison.OrdinalIgnoreCase)
-            && !IsPlaceholderHash(expectedHash))
+        var profilerPath = Path.Combine(coreDir, fileName);
+        if (!File.Exists(profilerPath))
         {
-            throw new InvalidOperationException(
-                $"Profiler hash mismatch for {fileName}. " +
-                $"Expected {expectedHash}, got {actualHash}. Refusing to attach.");
+            throw new FileNotFoundException(
+                $"Native profiler not found at {profilerPath}. " +
+                "The s&box adapter is responsible for downloading and SHA-256-verifying " +
+                $"{fileName} into the same cache folder as Secbox.Core.dll. " +
+                "Check CorePolicy.CoreFiles in the adapter source.",
+                profilerPath);
         }
 
-        if (!File.Exists(cachePath) || !SafeReadAllBytes(cachePath).SequenceEqual(bytes))
-            File.WriteAllBytes(cachePath, bytes);
-
-        return cachePath;
-    }
-
-    static byte[] SafeReadAllBytes(string p)
-    {
-        try { return File.ReadAllBytes(p); } catch { return Array.Empty<byte>(); }
-    }
-
-    static bool IsPlaceholderHash(string h) =>
-        h.All(c => c == '0') || string.IsNullOrEmpty(h);
-
-    static (string ResourceName, string ExpectedHash, string FileName) SelectPlatformResource()
-    {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
-            && RuntimeInformation.OSArchitecture == Architecture.X64)
-        {
-            return ("Secbox.Core.Profiler.EmbeddedProfilerResources.secbox-profiler-win-x64.dll",
-                    ProfilerHashes.ExpectedSha256WinX64,
-                    "secbox-profiler-win-x64.dll");
-        }
-
-        throw new PlatformNotSupportedException(
-            $"Profiler (Tier B) not available on {RuntimeInformation.OSDescription} " +
-            $"{RuntimeInformation.OSArchitecture}. Only win-x64 is shipped today.");
+        return profilerPath;
     }
 
     static async Task AttachAsync(string profilerPath, CancellationToken ct)
