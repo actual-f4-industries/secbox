@@ -10,7 +10,7 @@ namespace Secbox.Core.Profiler;
 public static class ProfilerHashes
 {
     public const string ExpectedSha256WinX64 =
-        "351f1bcf0d913233ffeef5ef4da91cd60dbc6455eee9a63093808eee2d10bd64";
+        "f765cf4773a81acd588e7abea7938eee22c98ceb005e973ed35f5ebeb8f6f00e";
 
     // Future:
     // public const string ExpectedSha256LinuxX64 = "...";
