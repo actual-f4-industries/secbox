@@ -13,8 +13,7 @@
 [CmdletBinding()]
 param(
     [string] $RuntimeRef = "v9.0.0",
-    [string] $OutDir = (Join-Path $PSScriptRoot ".." "externals" "coreclr-pal-headers"),
-    [switch] $Verbose
+    [string] $OutDir = (Join-Path $PSScriptRoot ".." "externals" "coreclr-pal-headers")
 )
 
 # Don't $ErrorActionPreference=Stop — we handle 404s per file.
