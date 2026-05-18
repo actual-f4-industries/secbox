@@ -56,6 +56,7 @@ namespace {
 class SecboxProfiler : public ICorProfilerCallback11 {
 public:
     SecboxProfiler() : ref_(1), info_(nullptr) {}
+    virtual ~SecboxProfiler() = default;
 
     // === IUnknown ===
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
@@ -103,8 +104,9 @@ public:
                    | COR_PRF_MONITOR_EXCEPTIONS
                    | COR_PRF_ENABLE_REJIT;       // future IL rewrite
         DWORD maskHi = 0;
-        try { info_->SetEventMask2(mask, maskHi); }
-        catch (...) { /* tolerate */ }
+        // ICorProfilerInfo methods return HRESULT — they don't throw managed
+        // exceptions. SetEventMask2 failure isn't fatal for observer-only mode.
+        (void)info_->SetEventMask2(mask, maskHi);
 
         SetInitialized(true);
         Emit(EK_ProfilerAttached, L"{}");
@@ -249,8 +251,14 @@ public:
     // ICorProfilerCallback9+
     HRESULT STDMETHODCALLTYPE DynamicMethodJITCompilationFinished(FunctionID, HRESULT, BOOL) override { return S_OK; }
     // ICorProfilerCallback10+
-    HRESULT STDMETHODCALLTYPE EventPipeEventDelivered(EVENTPIPE_PROVIDER, DWORD, DWORD, ULONGLONG, ULONGLONG, ULONGLONG,
-        LPCGUID, LPCGUID, ThreadID, ULONG, COR_PRF_EVENTPIPE_PARAM_DESC*, ULONG, BYTE*) override { return S_OK; }
+    // Signature mirrors corprof.h: metadata + event payloads as raw byte
+    // blobs, stack frames as a UINT_PTR[].
+    HRESULT STDMETHODCALLTYPE EventPipeEventDelivered(
+        EVENTPIPE_PROVIDER, DWORD, DWORD,
+        ULONG, LPCBYTE,
+        ULONG, LPCBYTE,
+        LPCGUID, LPCGUID,
+        ThreadID, ULONG, UINT_PTR[]) override { return S_OK; }
     HRESULT STDMETHODCALLTYPE EventPipeProviderCreated(EVENTPIPE_PROVIDER) override { return S_OK; }
     // ICorProfilerCallback11+
     HRESULT STDMETHODCALLTYPE LoadAsNotificationOnly(BOOL*) override { return S_OK; }
@@ -261,7 +269,7 @@ private:
         AppDomainID appDomainId = 0; ModuleID moduleId = 0;
         if (info_) info_->GetAssemblyInfo(asmId, _countof(name), &nameLen, name, &appDomainId, &moduleId);
         std::wstringstream ss;
-        ss << L"{" << K(L"assemblyId") << reinterpret_cast<uint64_t>(asmId)
+        ss << L"{" << K(L"assemblyId") << static_cast<uint64_t>(asmId)
            << L"," << K(L"name") << Quote(std::wstring(name, nameLen ? nameLen - 1 : 0))
            << L"}";
         return ss.str();
@@ -272,9 +280,9 @@ private:
         AssemblyID asmId = 0; LPCBYTE baseAddr = nullptr;
         if (info_) info_->GetModuleInfo(modId, &baseAddr, _countof(name), &nameLen, name, &asmId);
         std::wstringstream ss;
-        ss << L"{" << K(L"moduleId") << reinterpret_cast<uint64_t>(modId)
+        ss << L"{" << K(L"moduleId") << static_cast<uint64_t>(modId)
            << L"," << K(L"path") << Quote(std::wstring(name, nameLen ? nameLen - 1 : 0))
-           << L"," << K(L"assemblyId") << reinterpret_cast<uint64_t>(asmId)
+           << L"," << K(L"assemblyId") << static_cast<uint64_t>(asmId)
            << L"}";
         return ss.str();
     }
@@ -283,8 +291,8 @@ private:
         ClassID classId = 0; ModuleID moduleId = 0; mdToken token = 0;
         if (info_) info_->GetFunctionInfo(funcId, &classId, &moduleId, &token);
         std::wstringstream ss;
-        ss << L"{" << K(L"functionId") << reinterpret_cast<uint64_t>(funcId)
-           << L"," << K(L"moduleId") << reinterpret_cast<uint64_t>(moduleId)
+        ss << L"{" << K(L"functionId") << static_cast<uint64_t>(funcId)
+           << L"," << K(L"moduleId") << static_cast<uint64_t>(moduleId)
            << L"," << K(L"token") << static_cast<uint32_t>(token)
            << L"," << K(L"dynamic") << (dynamic ? L"true" : L"false")
            << L"}";
@@ -298,11 +306,16 @@ private:
 } // namespace secbox
 
 // === Exported COM entry points for CoreCLR's profiler loader ===
+//
+// combaseapi.h already declares DllGetClassObject / DllCanUnloadNow with
+// their canonical linkage — we only DEFINE them below; redeclaring with our
+// own attributes collides on MSVC (C2375). The .def file (or DllExport
+// pragma) handles the export.
 
 #if defined(_WIN32)
 #include <objbase.h>
-extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllGetClassObject(REFCLSID, REFIID, LPVOID*);
-extern "C" __declspec(dllexport) HRESULT STDMETHODCALLTYPE DllCanUnloadNow();
+#pragma comment(linker, "/EXPORT:DllGetClassObject,PRIVATE")
+#pragma comment(linker, "/EXPORT:DllCanUnloadNow,PRIVATE")
 #endif
 
 namespace {
@@ -336,7 +349,7 @@ namespace {
     };
 }
 
-extern "C" HRESULT STDMETHODCALLTYPE DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
+STDAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, LPVOID* ppv) {
     if (ppv == nullptr) return E_POINTER;
     if (rclsid != SecboxProfilerCLSID) return CLASS_E_CLASSNOTAVAILABLE;
     auto* f = new ClassFactory();
@@ -345,6 +358,6 @@ extern "C" HRESULT STDMETHODCALLTYPE DllGetClassObject(REFCLSID rclsid, REFIID r
     return hr;
 }
 
-extern "C" HRESULT STDMETHODCALLTYPE DllCanUnloadNow() {
+STDAPI DllCanUnloadNow() {
     return S_FALSE; // pinned for process lifetime; matches every other profiler
 }
