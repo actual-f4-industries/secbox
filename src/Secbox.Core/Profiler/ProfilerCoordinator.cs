@@ -27,6 +27,7 @@ public static class ProfilerCoordinator
 
     static readonly SemaphoreSlim _initLock = new(1, 1);
     static bool _attached;
+    static bool _resolverRegistered;
     static string? _resolvedPath;
 
     public static bool IsAttached => _attached;
@@ -40,11 +41,36 @@ public static class ProfilerCoordinator
         {
             if (_attached) return;
             var path = LocateProfilerBinary();
-            await AttachAsync(path, ct).ConfigureAwait(false);
             _resolvedPath = path;
+            RegisterDllImportResolverOnce();   // before any P/Invoke in ProfilerSensor
+            await AttachAsync(path, ct).ConfigureAwait(false);
             _attached = true;
         }
         finally { _initLock.Release(); }
+    }
+
+    // ProfilerSensor's P/Invokes reference NativeLibName ("secbox-profiler"),
+    // but the actual file on disk is "secbox-profiler-win-x64.dll" — the
+    // platform suffix has to live in the filename so future cross-platform
+    // builds can ship side-by-side. The loader's name-based lookup won't
+    // bridge that gap on its own. SetDllImportResolver redirects every
+    // P/Invoke against NativeLibName to LoadLibrary(absolute cached path).
+    //
+    // CoreCLR allows one resolver per (Assembly, name) pair, so this is
+    // gated on _resolverRegistered to avoid the second-call exception.
+    static void RegisterDllImportResolverOnce()
+    {
+        if (_resolverRegistered) return;
+        NativeLibrary.SetDllImportResolver(
+            typeof(ProfilerCoordinator).Assembly,
+            static (libraryName, _, _) =>
+            {
+                if (libraryName != NativeLibName) return IntPtr.Zero;
+                var p = _resolvedPath;
+                if (string.IsNullOrEmpty(p)) return IntPtr.Zero;
+                return NativeLibrary.TryLoad(p, out var handle) ? handle : IntPtr.Zero;
+            });
+        _resolverRegistered = true;
     }
 
     static string LocateProfilerBinary()
