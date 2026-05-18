@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Diagnostics.NETCore.Client;
 
 namespace Secbox.Core.Profiler;
@@ -40,11 +41,19 @@ public static class ProfilerCoordinator
         try
         {
             if (_attached) return;
+            Diag("EnsureAttachedAsync: begin");
             var path = LocateProfilerBinary();
+            Diag($"EnsureAttachedAsync: located profiler at '{path}', size={new FileInfo(path).Length:N0} bytes");
             _resolvedPath = path;
-            RegisterDllImportResolverOnce();   // before any P/Invoke in ProfilerSensor
+            RegisterDllImportResolverOnce();
             await AttachAsync(path, ct).ConfigureAwait(false);
             _attached = true;
+            Diag("EnsureAttachedAsync: complete (attached=true)");
+        }
+        catch (Exception ex)
+        {
+            Diag($"EnsureAttachedAsync: THREW {ex.GetType().Name}: {ex.Message}");
+            throw;
         }
         finally { _initLock.Release(); }
     }
@@ -78,16 +87,45 @@ public static class ProfilerCoordinator
                 typeof(ProfilerCoordinator).Assembly,
                 static (libraryName, _, _) =>
                 {
-                    if (libraryName != NativeLibName) return IntPtr.Zero;
+                    Diag($"resolver: invoked for libraryName='{libraryName}'");
+                    if (libraryName != NativeLibName)
+                    {
+                        Diag($"resolver: name mismatch (expected '{NativeLibName}'), returning Zero");
+                        return IntPtr.Zero;
+                    }
                     var p = _resolvedPath;
-                    if (string.IsNullOrEmpty(p)) return IntPtr.Zero;
-                    return NativeLibrary.TryLoad(p, out var handle) ? handle : IntPtr.Zero;
+                    if (string.IsNullOrEmpty(p))
+                    {
+                        Diag("resolver: _resolvedPath is empty, returning Zero");
+                        return IntPtr.Zero;
+                    }
+                    if (!File.Exists(p))
+                    {
+                        Diag($"resolver: file missing at '{p}', returning Zero");
+                        return IntPtr.Zero;
+                    }
+                    try
+                    {
+                        var handle = NativeLibrary.Load(p);
+                        Diag($"resolver: NativeLibrary.Load OK for '{p}', handle=0x{handle.ToInt64():x}");
+                        return handle;
+                    }
+                    catch (Exception ex)
+                    {
+                        Diag($"resolver: NativeLibrary.Load THREW {ex.GetType().Name}: {ex.Message}");
+                        return IntPtr.Zero;
+                    }
                 });
+            Diag("RegisterDllImportResolverOnce: SetDllImportResolver succeeded");
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException ex)
         {
-            // Resolver already set for this assembly — accept and move on.
-            // See block comment above for the reasoning.
+            Diag($"RegisterDllImportResolverOnce: caught InvalidOperationException ({ex.Message}) — assuming existing resolver is ours");
+        }
+        catch (Exception ex)
+        {
+            Diag($"RegisterDllImportResolverOnce: THREW {ex.GetType().Name}: {ex.Message}");
+            throw;
         }
         _resolverRegistered = true;
     }
@@ -123,6 +161,7 @@ public static class ProfilerCoordinator
 
     static async Task AttachAsync(string profilerPath, CancellationToken ct)
     {
+        Diag($"AttachAsync: begin pid={Environment.ProcessId} path='{profilerPath}'");
         var client = new DiagnosticsClient(Environment.ProcessId);
         try
         {
@@ -134,13 +173,46 @@ public static class ProfilerCoordinator
                     attachTimeout: TimeSpan.FromSeconds(10),
                     profilerGuid: ProfilerGuid,
                     profilerPath: profilerPath), ct).ConfigureAwait(false);
+            Diag("AttachAsync: DiagnosticsClient.AttachProfiler returned OK");
         }
         catch (ServerErrorException ex) when (ex.Message.Contains("0x8013136A", StringComparison.OrdinalIgnoreCase))
         {
             // CORPROF_E_PROFILER_ALREADY_ACTIVE — another profiler attached first.
+            Diag("AttachAsync: another profiler already attached (CORPROF_E_PROFILER_ALREADY_ACTIVE)");
             throw new InvalidOperationException(
                 "Another CLR profiler is already attached to this editor process. " +
                 "secbox runtime monitoring degrades to non-profiler tiers.", ex);
         }
+        catch (Exception ex)
+        {
+            Diag($"AttachAsync: DiagnosticsClient.AttachProfiler THREW {ex.GetType().Name}: {ex.Message}");
+            throw;
+        }
+    }
+
+    // Diagnostic sink — writes to %LOCALAPPDATA%/secbox/profiler-diag.log.
+    // This is a debug aid for tracing why Tier B attach fails on a user
+    // machine; intentionally simple, no rotation, swallows all errors.
+    // Path is OUTSIDE the per-version cache folder so it survives reloads.
+    static readonly object _diagLock = new();
+    public static string DiagLogPath =>
+        Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "secbox", "profiler-diag.log");
+
+    static void Diag(string message)
+    {
+        try
+        {
+            lock (_diagLock)
+            {
+                var dir = Path.GetDirectoryName(DiagLogPath);
+                if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
+                    Directory.CreateDirectory(dir);
+                var line = $"{DateTime.UtcNow:HH:mm:ss.fff} [tid={Environment.CurrentManagedThreadId:D2}] {message}\n";
+                File.AppendAllText(DiagLogPath, line, Encoding.UTF8);
+            }
+        }
+        catch { /* never throw from logger */ }
     }
 }
