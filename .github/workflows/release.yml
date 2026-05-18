@@ -301,19 +301,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ steps.ver.outputs.label }}"
+          # Long-form notes live in RELEASE_NOTES.md so they can include
+          # blank lines and backticks without fighting YAML block-scalar
+          # parsing. Fall back to a one-liner if the file is missing.
+          notes_file="RELEASE_NOTES.md"
+          notes_arg=()
+          if [ -f "$notes_file" ]; then
+            notes_arg=(--notes-file "$notes_file")
+          else
+            notes_arg=(--notes "Bridge bundle, native CLR profiler (Tier B), and Sentinel installer (Tier A). See hashes.txt for SHA-256s and README.md for distribution details.")
+          fi
+
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" release/* --clobber
           else
-            gh release create "$tag" release/* \
-              --title "secbox $tag" \
-              --notes "Bridge bundle (Secbox.Core + deps), native CLR profiler (Tier B), and Sentinel installer (Tier A).
-
-The s&box adapter (\`secbox.editor\`) downloads these assets at runtime from
-\`https://github.com/actual-f4-industries/secbox/releases/download/${tag}/<file>\`,
-verifies each blob's SHA-256 against the value pinned in \`CorePolicy.CoreFiles\`,
-then loads \`Secbox.Core.dll\` into an isolated AssemblyLoadContext.
-
-\`hashes.txt\` lists the SHA-256 of every artifact. Paste those values into
-\`CorePolicy.CoreFiles\` and \`ProfilerHashes.cs\` in the adapter, then bump
-\`CorePolicy.CoreVersion\` to \`${tag}\` and re-publish the adapter."
+            gh release create "$tag" release/* --title "secbox $tag" "${notes_arg[@]}"
           fi
