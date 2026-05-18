@@ -15,6 +15,16 @@
 #include "profiler.h"
 #include "event_ring.h"
 
+// INITGUID must be defined exactly once in the program before <initguid.h>
+// so the DEFINE_GUID macros in corprof.h/cor.h emit actual GUID storage
+// instead of `extern` declarations. profiler.cpp is the sole TU that pulls
+// in the CorProf headers; declaring INITGUID anywhere else would double-
+// define every IID at link time.
+#ifndef INITGUID
+#define INITGUID
+#endif
+#include <initguid.h>
+
 #include <cor.h>
 #include <corhdr.h>
 #include <corprof.h>
