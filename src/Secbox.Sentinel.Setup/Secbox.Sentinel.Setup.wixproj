@@ -4,19 +4,7 @@
     <OutputName>SecboxSentinel</OutputName>
     <OutputType>Package</OutputType>
     <InstallerPlatform>x64</InstallerPlatform>
-    <!--
-      Source folder of the published Sentinel service. The release workflow
-      runs `dotnet publish -r win-x64 -c Release` on Secbox.Sentinel.Service
-      and points HarvestFolder at the publish output before invoking msbuild
-      on this project. Local: set HarvestFolder=...\publish to test.
-    -->
     <HarvestFolder Condition="'$(HarvestFolder)' == ''">..\Secbox.Sentinel.Service\bin\Release\net10.0-windows\win-x64\publish</HarvestFolder>
-
-    <!--
-      Expose HarvestFolder as a WiX preprocessor variable so Package.wxs's
-      <Files Include="$(var.HarvestFolder)\**" /> resolves. WiX reads
-      DefineConstants and surfaces each NAME=VALUE entry as $(var.NAME).
-    -->
     <DefineConstants>HarvestFolder=$(HarvestFolder)</DefineConstants>
   </PropertyGroup>
 

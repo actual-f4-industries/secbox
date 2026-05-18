@@ -1,19 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  Secbox Sentinel installer (WiX v4).
+  Secbox Sentinel installer (WiX v5).
 
   Installs the Windows Service that performs ETW-based kernel monitoring on
   behalf of the in-editor Secbox.Core client. Per-machine install under
   Program Files. Service registered as "SecboxSentinel", runs as LocalSystem
   (required for kernel ETW sessions), starts automatically with the OS.
 
-  The MSI is signed in CI when SignPath/Microsoft Trusted Signing creds are
-  configured; unsigned local builds work too, the user just sees a UAC red
-  banner instead of a blue one.
-
-  Bitness: x64 inherited from the wixproj's <InstallerPlatform>x64</InstallerPlatform>.
-  WiX v4 removed the per-Component Win64 attribute; components default to
-  the package's bitness automatically.
+  Component design:
+   * ServiceExe        — holds SecboxSentinel.exe as KeyPath + ServiceInstall +
+                         ServiceControl + util:ServiceConfig. MSI REQUIRES the
+                         service binary to be the KeyPath of the same Component
+                         that owns ServiceInstall; otherwise InstallServices
+                         silently no-ops (no ImagePath to register).
+   * SentinelPayload   — auto-harvested via <Files Exclude=...> for every
+                         other file under the publish output. Excludes the
+                         service exe (already declared in ServiceExe) to
+                         avoid the duplicate-File ICE03 error.
+   * EventLogRegistration — pre-creates the Event Log source so the service's
+                         first emit doesn't trip the "source does not exist"
+                         path that requires admin to fix.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
@@ -34,28 +40,42 @@
     </StandardDirectory>
 
     <Feature Id="Main" Title="Secbox Sentinel" Level="1">
-      <!--
-        WiX v5 allows <Files> inside <ComponentGroup>, which is the cleanest
-        way to harvest a directory tree (replaces v3's heat invocation and
-        v4.0.x's container-restricted <Files> placement).
-      -->
-      <ComponentGroupRef Id="SentinelComponents" />
-      <ComponentRef Id="ServiceRegistration" />
+      <!-- Hand-authored: service exe + ServiceInstall + recovery actions. -->
+      <ComponentRef Id="ServiceExe" />
+      <!-- Auto-harvested via <Files> globs below (covers everything except .exe). -->
+      <ComponentGroupRef Id="SentinelPayload" />
       <ComponentRef Id="EventLogRegistration" />
     </Feature>
 
-    <ComponentGroup Id="SentinelComponents" Directory="INSTALLFOLDER">
-      <Files Include="$(var.HarvestFolder)\**" />
+    <!--
+      WiX 5's <Files> element does NOT support Exclude. Workaround: explicit
+      per-extension globs that collectively cover the publish output minus
+      the .exe (which lives in the hand-authored ServiceExe component above).
+      Publish output is: *.dll, *.json, *.pdb, *.exe at root + amd64/, arm64/,
+      x86/ native subdirs. If a future .NET version adds new file types here,
+      this list needs updating.
+    -->
+    <ComponentGroup Id="SentinelPayload" Directory="INSTALLFOLDER">
+      <Files Include="$(var.HarvestFolder)\*.dll" />
+      <Files Include="$(var.HarvestFolder)\*.json" />
+      <Files Include="$(var.HarvestFolder)\*.pdb" />
+      <Files Subdirectory="amd64" Include="$(var.HarvestFolder)\amd64\**" />
+      <Files Subdirectory="arm64" Include="$(var.HarvestFolder)\arm64\**" />
+      <Files Subdirectory="x86" Include="$(var.HarvestFolder)\x86\**" />
     </ComponentGroup>
 
     <DirectoryRef Id="INSTALLFOLDER">
-      <Component Id="ServiceRegistration" Guid="3e1d4a85-2f9c-4eb8-95a3-c97f0e842110">
-        <RegistryValue Root="HKLM"
-                       Key="SOFTWARE\secbox\Sentinel"
-                       Name="Installed"
-                       Type="integer"
-                       Value="1"
-                       KeyPath="yes" />
+      <!--
+        The service exe MUST be the KeyPath of the Component holding
+        ServiceInstall — MSI uses the KeyPath file to derive the service's
+        ImagePath. Without this anchoring InstallServices silently no-ops
+        and the subsequent util:ServiceConfig fails with 0x80070424
+        "Service does not exist".
+      -->
+      <Component Id="ServiceExe" Guid="3e1d4a85-2f9c-4eb8-95a3-c97f0e842110">
+        <File Id="SecboxSentinelExe"
+              Source="$(var.HarvestFolder)\SecboxSentinel.exe"
+              KeyPath="yes" />
 
         <ServiceInstall Id="SecboxSentinelService"
                         Name="SecboxSentinel"
@@ -68,13 +88,10 @@
                         Account="LocalSystem" />
 
         <!--
-          Auto-restart-on-failure. <util:ServiceConfig> MUST be a sibling of
-          <ServiceInstall> (not nested inside it) so its deferred CA
-          (Wix4ExecServiceConfig_X64) schedules after InstallServices has
-          actually registered the service. Nested placement produces error
-          0x80070424 "Service does not exist" and MSI exit 1603 — that
-          ordering bug is why this element lives here, not inside
-          <ServiceInstall>. ServiceName binds the CA to our service by name.
+          util:ServiceConfig as a Component-level sibling (not nested in
+          ServiceInstall) so its deferred CA schedules after the standard
+          InstallServices action has registered the service. Nesting it
+          inside ServiceInstall triggers the WiX 4/5 ordering bug.
         -->
         <util:ServiceConfig ServiceName="SecboxSentinel"
                             FirstFailureActionType="restart"
@@ -90,12 +107,9 @@
                         Remove="uninstall"
                         Wait="yes" />
       </Component>
+    </DirectoryRef>
 
-      <!--
-        Pre-create the Event Log source so the service's first
-        Microsoft.Extensions.Logging.EventLog emit doesn't trip the
-        "source does not exist" path that requires admin to fix.
-      -->
+    <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="EventLogRegistration" Guid="b9c0e7a1-3d22-4ad9-9c1a-7e2f0b8f9112">
         <RegistryKey Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\EventLog\Application\SecboxSentinel">
           <RegistryValue Type="integer" Name="TypesSupported" Value="7" />
