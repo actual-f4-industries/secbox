@@ -148,9 +148,18 @@ public sealed class SentinelClient : IAsyncDisposable
 
         // Subscribe-ack is delivered via the read loop and forwarded through a
         // short-lived TaskCompletionSource keyed by SubscriptionId.
+        //
+        // 10s hard timeout — service-side issue (malformed JSON, pipe closed
+        // mid-handshake, deserialiser dropping our envelope) must NEVER hang
+        // the caller indefinitely. EtwSensor catches TimeoutException and
+        // moves on with Status=Failed; the editor isn't stuck waiting forever.
         var tcs = new TaskCompletionSource<SubscribeAck>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingSubscribeAcks[req.SubscriptionId] = tcs;
-        using var reg = ct.Register(() => tcs.TrySetCanceled(ct));
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(10));
+        using var reg = timeoutCts.Token.Register(() =>
+            tcs.TrySetException(new TimeoutException(
+                $"Sentinel did not send subscribe-ack for {req.SubscriptionId} within 10 seconds")));
         try { return await tcs.Task.ConfigureAwait(false); }
         finally { _pendingSubscribeAcks.TryRemove(req.SubscriptionId, out _); }
     }
@@ -223,6 +232,19 @@ public sealed class SentinelClient : IAsyncDisposable
         {
             SetStatus(ClientStatus.Disconnected);
             _events.Writer.TryComplete();
+            // Fail every pending subscribe-ack so callers don't await forever.
+            // Without this, if the read loop dies (pipe closed, parse failure,
+            // service crash) after a SubscribeRequest was sent, the caller's
+            // TaskCompletionSource never completes and EtwSensor.StartAsync
+            // hangs — which holds the adapter's _attachLock indefinitely and
+            // blocks every subsequent Detach / ReapplySettings call.
+            foreach (var kv in _pendingSubscribeAcks)
+            {
+                kv.Value.TrySetException(new IOException(
+                    "Sentinel read loop ended before subscribe-ack arrived. " +
+                    $"Last error: {LastError ?? "(unknown)"}"));
+            }
+            _pendingSubscribeAcks.Clear();
         }
     }
 
