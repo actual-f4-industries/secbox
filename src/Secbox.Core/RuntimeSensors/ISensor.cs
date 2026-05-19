@@ -47,4 +47,17 @@ public sealed record SensorOptions(
     int EditorPid,
     SensorCapabilities Desired,
     IReadOnlyList<string>? PathAllowlist = null,
-    bool CaptureStack = false);
+    bool CaptureStack = false,
+    EnforcementPolicy? Enforcement = null);
+
+// Per-sensor enforcement knobs. Default = observe only (no Block, no Pause).
+// When a knob is true, the relevant sensor refuses the operation in-process
+// — e.g. ManagedCallSensor returning false from its Process.Start prefix.
+//
+// Phase 1: block library-attributed Process.Start.
+// Phase 2 (future): block managed File.Write to non-trusted paths,
+//   block managed HttpClient.GetAsync, etc.
+// Phase 2 (future): Pause-with-dialog — replaces the bool with an
+//   action enum (Allow / Block / Pause).
+public sealed record EnforcementPolicy(
+    bool BlockLibraryProcessStart = false);

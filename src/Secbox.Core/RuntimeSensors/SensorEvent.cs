@@ -32,6 +32,11 @@ public enum SensorEventKind
     ManagedHttpRequest = 1202,
     ManagedAssemblyLoadFrom = 1203,
 
+    // Tier E enforcement — the patch refused to let the call proceed.
+    // Always Critical severity (recorded only when a policy actively
+    // blocked a library-attributed call).
+    BlockedManagedProcessStart = 1290,
+
     // Tier A / kernel (mirror of Sentinel.Contracts.KernelEventKind)
     FileCreate = 2100,
     FileWrite = 2101,

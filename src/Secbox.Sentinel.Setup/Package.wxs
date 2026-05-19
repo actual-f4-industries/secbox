@@ -71,6 +71,9 @@
     <Feature Id="Main" Title="Secbox Sentinel" Level="1">
       <!-- Hand-authored: service exe + ServiceInstall + recovery actions. -->
       <ComponentRef Id="ServiceExe" />
+      <!-- WPF alert UI launched by the service in the active user's
+           session via CreateProcessAsUser. -->
+      <ComponentRef Id="AlertUiExe" />
       <!-- Auto-harvested via <Files> globs below (covers everything except .exe). -->
       <ComponentGroupRef Id="SentinelPayload" />
       <ComponentRef Id="EventLogRegistration" />
@@ -135,6 +138,21 @@
                         Stop="both"
                         Remove="uninstall"
                         Wait="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <!--
+        SecboxAlertUI.exe — WPF dialog launched by the service in the
+        active user's session via CreateProcessAsUser when the editor
+        drops an alert JSON in %PROGRAMDATA%\secbox\alerts\. NOT a
+        service; just a sibling exe. The auto-harvested DLL/JSON/PDB
+        files for AlertUI come through the SentinelPayload globs.
+      -->
+      <Component Id="AlertUiExe" Guid="6d7e3b54-1a48-4f9c-bc18-2a4e9d5f7a01">
+        <File Id="SecboxAlertUiExe"
+              Source="$(var.HarvestFolder)\SecboxAlertUI.exe"
+              KeyPath="yes" />
       </Component>
     </DirectoryRef>
 

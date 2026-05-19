@@ -135,6 +135,8 @@ public sealed class EventCorrelator : IAsyncDisposable
     // Default severity heuristic. Pluggable via ctor.
     static Severity DefaultSeverity(SensorEvent ev, CallAttributionRing.Entry? a) => ev.Kind switch
     {
+        SensorEventKind.BlockedManagedProcessStart => Severity.Critical,
+        SensorEventKind.ManagedProcessStart => Severity.Critical,
         SensorEventKind.FileDelete => Severity.High,
         SensorEventKind.ProcessStart => Severity.Critical,
         SensorEventKind.NetTcpConnect => Severity.Medium,

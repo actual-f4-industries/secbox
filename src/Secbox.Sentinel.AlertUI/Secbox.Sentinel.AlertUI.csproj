@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <OutputType>WinExe</OutputType>
+        <TargetFramework>net10.0-windows</TargetFramework>
+        <UseWPF>true</UseWPF>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <RootNamespace>Secbox.Sentinel.AlertUI</RootNamespace>
+        <AssemblyName>SecboxAlertUI</AssemblyName>
+        <ApplicationManifest>app.manifest</ApplicationManifest>
+        <!--
+            Single-file publish so the MSI ships ONE exe with no
+            adjacent runtime files. PublishSingleFile = true alone
+            still pulls deps as adjacent files unless IncludeNative*
+            are also set; we leave that to the release workflow.
+        -->
+        <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+        <SelfContained>false</SelfContained>
+    </PropertyGroup>
+
+</Project>

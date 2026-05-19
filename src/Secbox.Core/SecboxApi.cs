@@ -153,7 +153,8 @@ public static class SecboxApi
                 EditorPid: Environment.ProcessId,
                 Desired: opts.DesiredCapabilities,
                 PathAllowlist: opts.PathAllowlist,
-                CaptureStack: opts.CaptureStack);
+                CaptureStack: opts.CaptureStack,
+                Enforcement: opts.Enforcement);
 
             _runtimeSensors.StartAllAsync(sensorOpts, CancellationToken.None)
                 .GetAwaiter().GetResult();
@@ -235,7 +236,8 @@ public static class SecboxApi
             | SensorCapabilities.KernelNetwork
             | SensorCapabilities.NativeImageLoad,
         bool CaptureStack = false,
-        IReadOnlyList<string>? PathAllowlist = null);
+        IReadOnlyList<string>? PathAllowlist = null,
+        EnforcementPolicy? Enforcement = null);
 
     public sealed record RuntimeSensorAttachResult(
         bool Attached,

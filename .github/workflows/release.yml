@@ -149,6 +149,18 @@ jobs:
             -r win-x64 --self-contained true `
             -p:PublishSingleFile=false -p:PublishTrimmed=false
 
+      # Publish the WPF AlertUI into the SAME folder as the service. Both
+      # exes co-exist in INSTALLFOLDER; the service launches AlertUI from
+      # AppContext.BaseDirectory at runtime. AlertUI is framework-dependent
+      # (relies on the user's .NET 10 Desktop Runtime) — keeps the MSI small.
+      - name: Publish AlertUI into service folder
+        run: |
+          dotnet publish src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj `
+            -c ${{ env.CONFIGURATION }} `
+            -r win-x64 --self-contained false `
+            -p:PublishSingleFile=false `
+            -o src/Secbox.Sentinel.Service/bin/${{ env.CONFIGURATION }}/net10.0-windows/win-x64/publish
+
       - name: Upload publish dir
         uses: actions/upload-artifact@v4
         with:

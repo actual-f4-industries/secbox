@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -45,6 +46,7 @@ public sealed class ManagedCallSensor : ISensor
 
     static ChannelWriter<SensorEvent>? _sink;
     static long _sequence;
+    static EnforcementPolicy _policy = new();
     Harmony? _harmony;
 
     public Task StartAsync(SensorOptions options, ChannelWriter<SensorEvent> sink, CancellationToken ct)
@@ -53,6 +55,7 @@ public sealed class ManagedCallSensor : ISensor
         try
         {
             _sink = sink;
+            _policy = options.Enforcement ?? new EnforcementPolicy();
             _harmony = new Harmony(HarmonyId);
             PatchProcessStart(_harmony);
             Status = SensorStatus.Healthy;
@@ -70,6 +73,7 @@ public sealed class ManagedCallSensor : ISensor
         try { _harmony?.UnpatchAll(HarmonyId); } catch { }
         _harmony = null;
         _sink = null;
+        _policy = new EnforcementPolicy();
         Status = SensorStatus.Disabled;
         return Task.CompletedTask;
     }
@@ -109,15 +113,49 @@ public sealed class ManagedCallSensor : ISensor
         }
     }
 
-    // Prefix / Postfix bodies — public-static-or-private-static is what
-    // Harmony reflects to. Signature follows Harmony's named-parameter
-    // convention: `__state` for prefix-to-postfix data passing, `__result`
-    // for the patched method's return value, `__instance` for `this`.
-    static void StaticStartPrefix(out object? __state)
+    // Prefix / Postfix bodies — private-static is what Harmony reflects to.
+    // Signature follows Harmony's named-parameter convention:
+    //   __state    — prefix-to-postfix data passing
+    //   __result   — patched method's return value (ref to override)
+    //   __instance — `this` for instance methods
+    //
+    // Prefix return value: `bool` — returning false skips the original
+    // method entirely (the patched method does NOT run; __result is what
+    // the caller sees instead). True lets the original execute normally.
+    //
+    // Enforcement flow:
+    //   1. Walk stack — is caller a library? If not, return true (allow).
+    //   2. Record attribution into CallAttributionRing for downstream
+    //      correlator joins.
+    //   3. If _policy.BlockLibraryProcessStart: emit blocked event,
+    //      set __result to null/false, return false → original skipped.
+    //   4. Otherwise stash attribution in __state for the postfix to emit
+    //      a ManagedProcessStart event after the spawn succeeds.
+    static bool StaticStartPrefix(out object? __state, ref Process? __result)
     {
         __state = null;
-        try { __state = RecordIfLibraryCaller(); }
-        catch { __state = null; }
+        try
+        {
+            var lib = AttributeToLibrary();
+            if (lib == null) return true;
+
+            RecordAttribution(lib);
+
+            if (_policy.BlockLibraryProcessStart)
+            {
+                __result = null;
+                EmitBlocked(lib);
+                return false;
+            }
+
+            __state = lib;
+            return true;
+        }
+        catch
+        {
+            __state = null;
+            return true;
+        }
     }
 
     static void StaticStartPostfix(object? __state, Process? __result)
@@ -130,11 +168,31 @@ public sealed class ManagedCallSensor : ISensor
         catch { }
     }
 
-    static void InstanceStartPrefix(out object? __state)
+    static bool InstanceStartPrefix(out object? __state, ref bool __result)
     {
         __state = null;
-        try { __state = RecordIfLibraryCaller(); }
-        catch { __state = null; }
+        try
+        {
+            var lib = AttributeToLibrary();
+            if (lib == null) return true;
+
+            RecordAttribution(lib);
+
+            if (_policy.BlockLibraryProcessStart)
+            {
+                __result = false;
+                EmitBlocked(lib);
+                return false;
+            }
+
+            __state = lib;
+            return true;
+        }
+        catch
+        {
+            __state = null;
+            return true;
+        }
     }
 
     static void InstanceStartPostfix(object? __state, Process __instance, bool __result)
@@ -148,12 +206,12 @@ public sealed class ManagedCallSensor : ISensor
     }
 
     // Walk the managed stack outwards looking for the first frame whose
-    // declaring assembly is plausibly library code. If found, record an
-    // attribution entry and return it so the postfix can also emit a
-    // SensorEvent. Returns null when the caller is the editor / engine /
-    // BCL — non-library calls are intentionally not surfaced (the editor
-    // makes lots of internal Process.Start calls).
-    static LibraryAttribution? RecordIfLibraryCaller()
+    // declaring assembly is plausibly library code. Returns null when the
+    // caller is the editor / engine / BCL — non-library calls intentionally
+    // pass through (the editor makes plenty of internal Process.Start calls).
+    //
+    // Side-effect-free: callers decide whether to record attribution / emit.
+    static LibraryAttribution? AttributeToLibrary()
     {
         var st = new StackTrace(skipFrames: 2, fNeedFileInfo: false);
         for (int i = 0; i < st.FrameCount; i++)
@@ -169,7 +227,7 @@ public sealed class ManagedCallSensor : ISensor
             var path = TryGetAssemblyLocation(asm);
             if (!IsLibraryAttributable(asmName, path)) continue;
 
-            var lib = new LibraryAttribution
+            return new LibraryAttribution
             {
                 AssemblyName = asmName,
                 MethodName = method != null
@@ -177,21 +235,91 @@ public sealed class ManagedCallSensor : ISensor
                     : "(unknown)",
                 AssemblyPath = path,
             };
-
-            CallAttributionRing.Record(new CallAttributionRing.Entry
-            {
-                TimestampTicks = DateTimeOffset.UtcNow.UtcTicks,
-                ManagedTid = Environment.CurrentManagedThreadId,
-                NativeTid = (int)GetCurrentThreadId(),
-                CallerAssembly = lib.AssemblyName,
-                CallerMethod = lib.MethodName,
-                Op = "Process.Start",
-                ArgsSummary = null,
-            });
-
-            return lib;
         }
         return null;
+    }
+
+    // Write into the CallAttributionRing so a subsequent kernel ProcessStart
+    // event for the spawned child can be joined with library attribution.
+    // Keyed by (managed thread id, native thread id) — kernel events carry
+    // the native tid, so the correlator's nativeTid scan finds us.
+    static void RecordAttribution(LibraryAttribution lib)
+    {
+        CallAttributionRing.Record(new CallAttributionRing.Entry
+        {
+            TimestampTicks = DateTimeOffset.UtcNow.UtcTicks,
+            ManagedTid = Environment.CurrentManagedThreadId,
+            NativeTid = (int)GetCurrentThreadId(),
+            CallerAssembly = lib.AssemblyName,
+            CallerMethod = lib.MethodName,
+            Op = "Process.Start",
+            ArgsSummary = null,
+        });
+    }
+
+    // Emit a Critical-severity finding indicating the library's spawn was
+    // refused. Sequenced through the same channel as other events — sinks
+    // pick it up and surface in Recent Findings.
+    //
+    // Also drops a JSON file in %PROGRAMDATA%\secbox\alerts\ — the service's
+    // AlertSpawner watches that directory and launches SecboxAlertUI.exe in
+    // the active user's session. Doing the file drop SYNCHRONOUSLY here (in
+    // the prefix, before we return false to skip the original Process.Start)
+    // guarantees the alert payload is on disk before library code can pause
+    // or deadlock the editor. The service is in its own process; even if
+    // the editor freezes, AlertSpawner picks up the file and shows the UI.
+    static void EmitBlocked(LibraryAttribution lib)
+    {
+        var nowIso = DateTimeOffset.UtcNow.ToString("O");
+        var payload = JsonSerializer.Serialize(new
+        {
+            severity = "Critical",
+            kind = "BlockedManagedProcessStart",
+            target = $"{lib.AssemblyName}!{lib.MethodName}",
+            callerAssembly = lib.AssemblyName,
+            callerMethod = lib.MethodName,
+            timestamp = nowIso,
+            pid = Environment.ProcessId,
+            action = "Blocked",
+            note = "Library-attributed Process.Start was refused by Tier E EnforcementPolicy. "
+                 + "The original Process.Start did not execute; calling library code will see a "
+                 + "null return value and may throw on the next member access.",
+        });
+
+        TryDropAlertFile(payload);
+
+        _sink?.TryWrite(new SensorEvent(
+            Sequence: Interlocked.Increment(ref _sequence),
+            SensorId: "managed-call",
+            Kind: SensorEventKind.BlockedManagedProcessStart,
+            Timestamp: DateTimeOffset.UtcNow,
+            Pid: Environment.ProcessId,
+            Tid: Environment.CurrentManagedThreadId,
+            Target: $"{lib.AssemblyName}!{lib.MethodName}",
+            PayloadJson: payload));
+    }
+
+    // Drop folder: %PROGRAMDATA%\secbox\alerts\. Pre-create attempts during
+    // attach; here we re-create defensively in case the dir was wiped.
+    static readonly string AlertDropFolder = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+        "secbox", "alerts");
+
+    static void TryDropAlertFile(string payloadJson)
+    {
+        try
+        {
+            Directory.CreateDirectory(AlertDropFolder);
+            // Write to a .tmp first then rename so AlertSpawner's
+            // FileSystemWatcher never sees a partially-written file.
+            var name = $"{DateTime.UtcNow:yyyyMMddTHHmmssfff}_{Guid.NewGuid():N}.json";
+            var tmp = Path.Combine(AlertDropFolder, name + ".tmp");
+            var final = Path.Combine(AlertDropFolder, name);
+            File.WriteAllText(tmp, payloadJson);
+            File.Move(tmp, final);
+        }
+        catch { /* swallow — alert UI is best-effort; the SensorEvent path
+                  through the channel/correlator is the durable record */ }
     }
 
     static void EmitSpawn(LibraryAttribution lib, Process p)
