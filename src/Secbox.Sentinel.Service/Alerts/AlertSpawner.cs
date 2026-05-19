@@ -130,7 +130,14 @@ public sealed class AlertSpawner : BackgroundService
 
         try
         {
-            CreateProcessInUserSession((uint)sessionId, exe, $"\"{payloadPath}\"");
+            // Win32 contract: when applicationName is non-null, commandLine
+            // MUST still begin with the program name (it becomes argv[0]).
+            // If we pass only the payload path, WPF sees it as argv[0] and
+            // e.Args is empty — App.OnStartup throws "usage: …".
+            CreateProcessInUserSession(
+                (uint)sessionId,
+                exe,
+                $"\"{exe}\" \"{payloadPath}\"");
             _log.LogInformation("AlertUI launched in session {Sid} for {Path}", sessionId, payloadPath);
             // AlertUI deletes the payload file itself after reading.
         }
@@ -189,16 +196,15 @@ public sealed class AlertSpawner : BackgroundService
             var si = new STARTUPINFO { cb = Marshal.SizeOf<STARTUPINFO>(), lpDesktop = @"winsta0\default" };
             var pi = new PROCESS_INFORMATION();
 
-            // CommandLine MUST be writable per Win32 contract; CreateProcessAsUser
-            // may modify it in-place. The marshaller of a string parameter passes
-            // a read-only ptr; we build a writable buffer explicitly.
-            var cmdLineBuf = new string('\0', commandLine.Length + 256);
-            cmdLineBuf = commandLine;
-
+            // The string marshaller materialises commandLine into a fresh
+            // LPWSTR buffer that Windows can mutate; we don't need to manage
+            // the buffer ourselves. CharSet=Unicode is already on the
+            // P/Invoke signature below. (The earlier "writable buffer" idea
+            // didn't actually do anything — strings are immutable in C#.)
             var ok = CreateProcessAsUser(
                 primaryToken,
                 exe,
-                cmdLineBuf,
+                commandLine,
                 ref sa, ref sa,
                 bInheritHandles: false,
                 dwCreationFlags: CREATE_UNICODE_ENVIRONMENT | CREATE_NEW_CONSOLE,
