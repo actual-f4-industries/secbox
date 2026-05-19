@@ -145,6 +145,8 @@ public static class SecboxApi
                     _runtimeSensors.Add(new ProfilerSensor());
                 if (opts.EnableEtw)
                     _runtimeSensors.Add(new EtwSensor());
+                if (opts.EnableManagedHook)
+                    _runtimeSensors.Add(new ManagedCallSensor());
             }
 
             var sensorOpts = new SensorOptions(
@@ -225,6 +227,7 @@ public static class SecboxApi
     public sealed record RuntimeSensorOptions(
         bool EnableProfiler = true,
         bool EnableEtw = false,
+        bool EnableManagedHook = true,
         SensorCapabilities DesiredCapabilities = SensorCapabilities.ManagedCalls
             | SensorCapabilities.DynamicCode
             | SensorCapabilities.KernelFile

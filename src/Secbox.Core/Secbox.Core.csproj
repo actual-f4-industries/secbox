@@ -32,6 +32,15 @@
             launcher shim required).
         -->
         <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.553101" />
+        <!--
+            Lib.Harmony — runtime IL patching used by ManagedCallSensor
+            (Tier E) to intercept `System.Diagnostics.Process.Start` and
+            similar tripwire APIs. The patch prefix walks the managed stack
+            to find the calling library assembly, writes an entry into
+            CallAttributionRing so a subsequent kernel ProcessStart event
+            on the same thread can be joined with library attribution.
+        -->
+        <PackageReference Include="Lib.Harmony" Version="2.3.6" />
     </ItemGroup>
 
     <!--

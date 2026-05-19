@@ -110,7 +110,8 @@ jobs:
             "Secbox.Sentinel.Contracts.dll",
             "Secbox.Sentinel.Client.dll",
             "Mono.Cecil.dll",
-            "Microsoft.Diagnostics.NETCore.Client.dll"
+            "Microsoft.Diagnostics.NETCore.Client.dll",
+            "0Harmony.dll"
           )
           foreach ($f in $files) {
             $src = Join-Path $bin $f

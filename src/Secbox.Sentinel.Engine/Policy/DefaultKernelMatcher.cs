@@ -3,16 +3,31 @@ using Secbox.Sentinel.Contracts;
 
 namespace Secbox.Sentinel.Engine.Policy;
 
-// Default matcher: PID filter + provider filter + glob-style path allowlist.
-// All matching is done in-process on the service side so a noisy subscriber
-// can't be a DOS vector — events get filtered down to that subscriber's
-// interest before being forwarded over the pipe.
+// Default matcher: PID-tree filter + provider filter + glob-style path
+// allowlist. All matching is done in-process on the service side so a noisy
+// subscriber can't be a DOS vector — events get filtered down to that
+// subscriber's interest before being forwarded over the pipe.
+//
+// PID matching uses the ProcessTree: an event matches if its PID equals the
+// subscription's EditorPid OR is a descendant of it. Catches activity from
+// child processes the editor spawns (e.g., a library that downloads and
+// runs scfu.exe — without descendant tracking, scfu.exe's file/network/
+// registry activity would be invisible to the subscription).
 public sealed class DefaultKernelMatcher : IKernelRuleMatcher
 {
+    readonly ProcessTree _tree;
+
+    public DefaultKernelMatcher(ProcessTree tree)
+    {
+        _tree = tree;
+    }
+
     public MatchResult Match(KernelEvent ev, Subscription sub)
     {
-        // PID filter — the most important one.
-        if (sub.EditorPid != 0 && ev.Pid != sub.EditorPid) return new(false);
+        // PID filter — the most important one. Includes child processes
+        // recursively via the ProcessTree.
+        if (sub.EditorPid != 0 && !_tree.IsDescendantOrSelf(ev.Pid, sub.EditorPid))
+            return new(false);
 
         // Provider filter — translate the event kind to its owning provider.
         var providerForKind = ProviderForKind(ev.Kind);

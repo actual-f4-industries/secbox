@@ -14,13 +14,15 @@ public sealed class EngineHost : IAsyncDisposable
     public EtwCollector Collector { get; }
     public IKernelRuleMatcher Matcher { get; }
     public SubscriptionRegistry Subscriptions { get; }
+    public ProcessTree ProcessTree { get; }
 
     public EngineHost(ILoggerFactory? loggers = null)
     {
         loggers ??= NullLoggerFactory.Instance;
         Collector = new EtwCollector(loggers.CreateLogger<EtwCollector>());
-        Matcher = new DefaultKernelMatcher();
-        Subscriptions = new SubscriptionRegistry();
+        ProcessTree = new ProcessTree();
+        Matcher = new DefaultKernelMatcher(ProcessTree);
+        Subscriptions = new SubscriptionRegistry(ProcessTree);
     }
 
     // Default provider lineup. The service host calls this once at startup.

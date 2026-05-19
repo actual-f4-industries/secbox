@@ -47,6 +47,28 @@ public sealed class SentinelWorker : BackgroundService
     {
         await foreach (var ev in _engine.Collector.Events.ReadAllAsync(ct).ConfigureAwait(false))
         {
+            // Update process tree BEFORE noise/match. ProcessStart for an
+            // editor descendant must register the new PID first, otherwise
+            // the subsequent matcher check (descendant lookup) misses the
+            // event for the freshly spawned child. ProcessStart/Stop events
+            // themselves go through the rest of the pipeline normally.
+            if (ev.Kind == Secbox.Sentinel.Contracts.KernelEventKind.ProcessStart)
+            {
+                var parentPid = ParseParentPid(ev);
+                _engine.ProcessTree.OnProcessStart(ev.Pid, parentPid);
+            }
+            else if (ev.Kind == Secbox.Sentinel.Contracts.KernelEventKind.ProcessStop)
+            {
+                _engine.ProcessTree.OnProcessStop(ev.Pid);
+            }
+
+            // Cross-cutting noise filter — drops system-DLL probes, registry
+            // reads, editor self-activity, and our own self-writes (which
+            // would create a feedback loop). Runs once per event before the
+            // per-subscription matcher, so its cost is O(events) not
+            // O(events × subscriptions). See NoiseFilter for the rule list.
+            if (NoiseFilter.IsNoise(ev)) continue;
+
             foreach (var sub in _engine.Subscriptions.Snapshot())
             {
                 var match = _engine.Matcher.Match(ev, sub);
@@ -54,6 +76,12 @@ public sealed class SentinelWorker : BackgroundService
                 _pipes.Forward(sub.SubscriptionId, ev);
             }
         }
+    }
+
+    static int ParseParentPid(Secbox.Sentinel.Contracts.KernelEvent ev)
+    {
+        if (ev.Extras == null) return 0;
+        return ev.Extras.TryGetValue("parentPid", out var s) && int.TryParse(s, out var p) ? p : 0;
     }
 
     public override async Task StopAsync(CancellationToken cancellationToken)

@@ -24,6 +24,14 @@ public enum SensorEventKind
     ExceptionThrown = 1004,
     ProfilerAttached = 1099,
 
+    // Tier E / managed-call tripwires (Harmony-patched APIs intercepted in
+    // the editor process). Used to mark "library code attempted X" with
+    // attribution before the resulting kernel event reaches the correlator.
+    ManagedProcessStart = 1200,
+    ManagedFileWrite = 1201,
+    ManagedHttpRequest = 1202,
+    ManagedAssemblyLoadFrom = 1203,
+
     // Tier A / kernel (mirror of Sentinel.Contracts.KernelEventKind)
     FileCreate = 2100,
     FileWrite = 2101,
