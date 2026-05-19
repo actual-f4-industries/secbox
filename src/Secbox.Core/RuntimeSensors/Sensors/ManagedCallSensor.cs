@@ -47,6 +47,13 @@ public sealed class ManagedCallSensor : ISensor
     static ChannelWriter<SensorEvent>? _sink;
     static long _sequence;
     static EnforcementPolicy _policy = new();
+    // Diagnostic counter — total times the Process.Start prefix has run
+    // since attach. Read by tests / status panels to confirm patching
+    // actually took effect (Harmony is meant to be invisible, but when
+    // attribution misses for an expected library spawn we need to know
+    // whether the prefix even ran). Reset on StopAsync.
+    static long _prefixHits;
+    public static long PrefixHits => Interlocked.Read(ref _prefixHits);
     Harmony? _harmony;
 
     public Task StartAsync(SensorOptions options, ChannelWriter<SensorEvent> sink, CancellationToken ct)
@@ -74,6 +81,7 @@ public sealed class ManagedCallSensor : ISensor
         _harmony = null;
         _sink = null;
         _policy = new EnforcementPolicy();
+        Interlocked.Exchange(ref _prefixHits, 0);
         Status = SensorStatus.Disabled;
         return Task.CompletedTask;
     }
@@ -136,6 +144,7 @@ public sealed class ManagedCallSensor : ISensor
         __state = null;
         try
         {
+            Interlocked.Increment(ref _prefixHits);
             var lib = AttributeToLibrary();
             if (lib == null) return true;
 
@@ -173,6 +182,7 @@ public sealed class ManagedCallSensor : ISensor
         __state = null;
         try
         {
+            Interlocked.Increment(ref _prefixHits);
             var lib = AttributeToLibrary();
             if (lib == null) return true;
 

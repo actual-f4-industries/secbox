@@ -9,14 +9,34 @@
         <RootNamespace>Secbox.Sentinel.AlertUI</RootNamespace>
         <AssemblyName>SecboxAlertUI</AssemblyName>
         <ApplicationManifest>app.manifest</ApplicationManifest>
-        <!--
-            Single-file publish so the MSI ships ONE exe with no
-            adjacent runtime files. PublishSingleFile = true alone
-            still pulls deps as adjacent files unless IncludeNative*
-            are also set; we leave that to the release workflow.
-        -->
         <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-        <SelfContained>false</SelfContained>
+        <!--
+            Self-contained single-file publish. The whole .NET 10 +
+            WPF runtime is embedded in SecboxAlertUI.exe so machines
+            without the .NET Desktop Runtime installed can still show
+            the alert dialog. Trade-off: exe is ~100MB.
+
+            Single-file specifics:
+              * PublishSingleFile=true            — one exe, no siblings
+              * IncludeAllContentForSelfExtract=true — embed deps.json /
+                runtimeconfig.json so we don't need them adjacent
+              * IncludeNativeLibrariesForSelfExtract=true — coreclr,
+                hostfxr, WPF presentationframework natives all embedded
+              * EnableCompressionInSingleFile=true — gzip-style packing,
+                trims ~40% off the size at the cost of small first-run
+                extraction
+              * PublishReadyToRun=true is intentionally NOT set; R2R bloats
+                further and WPF doesn't see much startup gain from it
+            We do NOT trim — WPF's XAML/binding reflection routinely
+            breaks under aggressive trimming and the savings aren't
+            worth the risk for a tool that ships in a one-off exe.
+        -->
+        <SelfContained>true</SelfContained>
+        <PublishSingleFile>true</PublishSingleFile>
+        <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+        <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+        <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+        <PublishTrimmed>false</PublishTrimmed>
     </PropertyGroup>
 
 </Project>

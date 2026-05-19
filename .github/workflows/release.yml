@@ -96,12 +96,11 @@ jobs:
             -p:ContinuousIntegrationBuild=true `
             --no-restore
 
-      - name: Publish WPF AlertUI for bridge bundle
+      - name: Publish WPF AlertUI (self-contained single-file)
         run: |
           dotnet publish src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj `
             -c ${{ env.CONFIGURATION }} `
-            -r win-x64 --self-contained false `
-            -p:PublishSingleFile=false
+            -r win-x64
 
       - name: Stage bridge bundle
         shell: pwsh
@@ -120,14 +119,12 @@ jobs:
             @{ src = $bin;      name = "Mono.Cecil.dll" },
             @{ src = $bin;      name = "Microsoft.Diagnostics.NETCore.Client.dll" },
             @{ src = $bin;      name = "0Harmony.dll" },
-            # WPF detection-alert dialog — bundled in the Core download so
-            # the editor adapter can spawn it directly without requiring
-            # Sentinel service to be installed. Framework-dependent: requires
-            # .NET 10 Desktop Runtime on the user's machine.
-            @{ src = $alertBin; name = "SecboxAlertUI.exe" },
-            @{ src = $alertBin; name = "SecboxAlertUI.dll" },
-            @{ src = $alertBin; name = "SecboxAlertUI.deps.json" },
-            @{ src = $alertBin; name = "SecboxAlertUI.runtimeconfig.json" }
+            # Self-contained single-file: .NET 10 + WPF embedded inside
+            # the exe (~62MB compressed). Works on machines without the
+            # .NET Desktop Runtime installed. Only one file to ship; the
+            # old SecboxAlertUI.{dll,deps.json,runtimeconfig.json} are
+            # embedded and no longer published as siblings.
+            @{ src = $alertBin; name = "SecboxAlertUI.exe" }
           )
           foreach ($f in $files) {
             $src = Join-Path $f.src $f.name
@@ -167,14 +164,18 @@ jobs:
 
       # Publish the WPF AlertUI into the SAME folder as the service. Both
       # exes co-exist in INSTALLFOLDER; the service launches AlertUI from
-      # AppContext.BaseDirectory at runtime. AlertUI is framework-dependent
-      # (relies on the user's .NET 10 Desktop Runtime) — keeps the MSI small.
+      # AppContext.BaseDirectory at runtime.
+      #
+      # Self-contained single-file: .NET 10 + WPF runtime are embedded in
+      # the exe (~62MB). Lets the alert dialog run on machines without
+      # the Desktop Runtime separately installed. SelfContained / single-
+      # file settings come from the csproj — we just publish with the
+      # output redirected next to the service.
       - name: Publish AlertUI into service folder
         run: |
           dotnet publish src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj `
             -c ${{ env.CONFIGURATION }} `
-            -r win-x64 --self-contained false `
-            -p:PublishSingleFile=false `
+            -r win-x64 `
             -o src/Secbox.Sentinel.Service/bin/${{ env.CONFIGURATION }}/net10.0-windows/win-x64/publish
 
       - name: Upload publish dir
