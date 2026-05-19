@@ -15,10 +15,18 @@ public static class SentinelProtocol
     public const int CurrentVersion = 1;
     public const int MinSupportedVersion = 1;
 
-    // Pipe name template. The {0} placeholder is the current user's SID so
-    // each interactive user gets their own pipe and the service-side DACL
-    // can scope by SID. Empty/missing SID falls back to "default".
-    public const string PipeNameFormat = "secbox-sentinel-{0}";
+    // Fixed pipe name. A previous design embedded the current user's SID to
+    // give each interactive user a dedicated pipe — that doesn't work when
+    // the service runs as LocalSystem, because the service-side resolver
+    // would produce a pipe named after S-1-5-18 while clients (running as
+    // the interactive user) would look for a pipe named after their own
+    // SID. They never met.
+    //
+    // Security is enforced by:
+    //   1. PipeSecurity DACL — Interactive + SYSTEM only, no remote.
+    //   2. ClientAuthenticator — per-connection process validation
+    //      (image path, signature, optional PID match).
+    public const string PipeName = "secbox-sentinel";
 
     // Process / service registration constants — referenced by installer,
     // service host, and client so all three agree without duplication.

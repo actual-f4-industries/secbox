@@ -1,5 +1,4 @@
 using System.IO.Pipes;
-using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
@@ -52,15 +51,7 @@ public sealed class SentinelClient : IAsyncDisposable
         _editorPid = editorPid;
         _clientBuild = clientBuild;
         _reconnect = reconnect ?? new ReconnectPolicy();
-        _pipeName = ResolvePipeName();
-    }
-
-    static string ResolvePipeName()
-    {
-        string sid;
-        try { sid = WindowsIdentity.GetCurrent().User?.Value ?? "default"; }
-        catch { sid = "default"; }
-        return string.Format(SentinelProtocol.PipeNameFormat, sid);
+        _pipeName = SentinelProtocol.PipeName;
     }
 
     public async Task ConnectAsync(CancellationToken ct = default)
@@ -68,6 +59,7 @@ public sealed class SentinelClient : IAsyncDisposable
         if (Status == ClientStatus.Connected || Status == ClientStatus.Connecting) return;
         SetStatus(ClientStatus.Connecting);
 
+        Exception? lastEx = null;
         while (!ct.IsCancellationRequested && _reconnect.ShouldRetry)
         {
             try
@@ -78,6 +70,7 @@ public sealed class SentinelClient : IAsyncDisposable
             }
             catch (Exception ex)
             {
+                lastEx = ex;
                 LastError = ex.Message;
                 if (!_reconnect.ShouldRetry) { SetStatus(ClientStatus.Failed); throw; }
                 try { await Task.Delay(_reconnect.NextDelay(), ct).ConfigureAwait(false); }
@@ -86,6 +79,12 @@ public sealed class SentinelClient : IAsyncDisposable
         }
 
         SetStatus(ClientStatus.Failed);
+        // Surface the actual underlying connect error. Without this, the
+        // loop terminates via the WHILE condition (ShouldRetry=false) without
+        // ever re-throwing, and the caller sees a misleading downstream
+        // "Sentinel client not connected" from EnsureConnected() instead of
+        // the real pipe/auth/handshake reason.
+        if (lastEx != null) throw lastEx;
     }
 
     async Task ConnectOnceAsync(CancellationToken ct)

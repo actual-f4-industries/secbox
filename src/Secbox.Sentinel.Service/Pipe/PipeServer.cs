@@ -37,7 +37,7 @@ public sealed class PipeServer
 
     public async Task RunAsync(CancellationToken ct)
     {
-        var pipeName = ResolvePipeNameForCurrentUser();
+        var pipeName = SentinelProtocol.PipeName;
         _log.LogInformation("Pipe server listening on {Pipe}", pipeName);
 
         while (!ct.IsCancellationRequested)
@@ -81,14 +81,6 @@ public sealed class PipeServer
     {
         if (_bySubscription.TryGetValue(subscriptionId, out var s))
             s.Enqueue(ev);
-    }
-
-    static string ResolvePipeNameForCurrentUser()
-    {
-        string sid;
-        try { sid = WindowsIdentity.GetCurrent().User?.Value ?? "default"; }
-        catch { sid = "default"; }
-        return string.Format(SentinelProtocol.PipeNameFormat, sid);
     }
 
     static NamedPipeServerStream CreatePipe(string pipeName)
