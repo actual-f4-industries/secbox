@@ -121,6 +121,7 @@ public static class SecboxApi
     /// </summary>
     public static string AttachRuntimeSensors(string optionsJson, Action<string> eventSink)
     {
+        SensorRegistry? newlyCreated = null;
         try
         {
             var opts = string.IsNullOrWhiteSpace(optionsJson)
@@ -137,6 +138,7 @@ public static class SecboxApi
                         Sensors: GetStatusSnapshot()), JsonOpts);
 
                 _runtimeSensors = new SensorRegistry();
+                newlyCreated = _runtimeSensors;
                 _runtimeSensors.Correlator.AddSink(new JsonLineSink(eventSink));
 
                 if (opts.EnableProfiler)
@@ -161,9 +163,32 @@ public static class SecboxApi
         }
         catch (Exception ex)
         {
+            // Critical: cleanup the partial registry on exception. Without
+            // this the registry leaks — subsequent attach calls hit the
+            // "already attached" guard above and return Attached:false
+            // forever, while the leaked sensors keep producing events that
+            // the adapter sees but can't account for. Tear down any partial
+            // sensors so the next attach starts cleanly.
+            if (newlyCreated != null)
+            {
+                SensorRegistry? toCleanup = null;
+                lock (_runtimeLock)
+                {
+                    if (ReferenceEquals(_runtimeSensors, newlyCreated))
+                    {
+                        toCleanup = _runtimeSensors;
+                        _runtimeSensors = null;
+                    }
+                }
+                if (toCleanup != null)
+                {
+                    try { toCleanup.StopAllAsync(CancellationToken.None).GetAwaiter().GetResult(); } catch { }
+                    try { toCleanup.DisposeAsync().AsTask().GetAwaiter().GetResult(); } catch { }
+                }
+            }
             return JsonSerializer.Serialize(new RuntimeSensorAttachResult(
                 Attached: false,
-                Message: $"Attach failed: {ex.Message}",
+                Message: $"Attach failed: {ex.GetType().Name}: {ex.Message}",
                 Sensors: Array.Empty<SensorStatusInfo>()), JsonOpts);
         }
     }
