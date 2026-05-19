@@ -96,25 +96,41 @@ jobs:
             -p:ContinuousIntegrationBuild=true `
             --no-restore
 
+      - name: Publish WPF AlertUI for bridge bundle
+        run: |
+          dotnet publish src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj `
+            -c ${{ env.CONFIGURATION }} `
+            -r win-x64 --self-contained false `
+            -p:PublishSingleFile=false
+
       - name: Stage bridge bundle
         shell: pwsh
         run: |
           $bin = "src/Secbox.Core/bin/${{ env.CONFIGURATION }}/net10.0"
+          $alertBin = "src/Secbox.Sentinel.AlertUI/bin/${{ env.CONFIGURATION }}/net10.0-windows/win-x64/publish"
           $stage = "dist/bridge"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           $files = @(
-            "Secbox.Core.dll",
-            "Secbox.Contracts.dll",
-            "Secbox.Rules.dll",
-            "Secbox.Scanner.dll",
-            "Secbox.Sentinel.Contracts.dll",
-            "Secbox.Sentinel.Client.dll",
-            "Mono.Cecil.dll",
-            "Microsoft.Diagnostics.NETCore.Client.dll",
-            "0Harmony.dll"
+            @{ src = $bin;      name = "Secbox.Core.dll" },
+            @{ src = $bin;      name = "Secbox.Contracts.dll" },
+            @{ src = $bin;      name = "Secbox.Rules.dll" },
+            @{ src = $bin;      name = "Secbox.Scanner.dll" },
+            @{ src = $bin;      name = "Secbox.Sentinel.Contracts.dll" },
+            @{ src = $bin;      name = "Secbox.Sentinel.Client.dll" },
+            @{ src = $bin;      name = "Mono.Cecil.dll" },
+            @{ src = $bin;      name = "Microsoft.Diagnostics.NETCore.Client.dll" },
+            @{ src = $bin;      name = "0Harmony.dll" },
+            # WPF detection-alert dialog — bundled in the Core download so
+            # the editor adapter can spawn it directly without requiring
+            # Sentinel service to be installed. Framework-dependent: requires
+            # .NET 10 Desktop Runtime on the user's machine.
+            @{ src = $alertBin; name = "SecboxAlertUI.exe" },
+            @{ src = $alertBin; name = "SecboxAlertUI.dll" },
+            @{ src = $alertBin; name = "SecboxAlertUI.deps.json" },
+            @{ src = $alertBin; name = "SecboxAlertUI.runtimeconfig.json" }
           )
           foreach ($f in $files) {
-            $src = Join-Path $bin $f
+            $src = Join-Path $f.src $f.name
             if (Test-Path $src) { Copy-Item $src $stage -Force }
           }
           Get-ChildItem $stage | ForEach-Object {
