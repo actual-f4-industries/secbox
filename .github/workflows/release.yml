@@ -156,10 +156,10 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
-  # 4. Build Sentinel installer MSI (WiX v4).
+  # 4. Build Sentinel installer MSI (WiX v5).
   # -------------------------------------------------------------------------
   build-installer:
-    name: Build Sentinel MSI (WiX v4)
+    name: Build Sentinel MSI (WiX v5)
     runs-on: windows-latest
     needs: [ publish-sentinel ]
     steps:

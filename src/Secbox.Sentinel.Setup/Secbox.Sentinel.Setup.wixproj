@@ -10,6 +10,13 @@
 
   <ItemGroup>
     <PackageReference Include="WixToolset.Util.wixext" Version="5.0.2" />
+    <PackageReference Include="WixToolset.UI.wixext" Version="5.0.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="banner.bmp" />
+    <Content Include="welcome.bmp" />
+    <Content Include="SecboxSentinel.ico" />
   </ItemGroup>
 
 </Project>

@@ -22,6 +22,7 @@
                          path that requires admin to fix.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui"
      xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
 
   <Package Name="Secbox Sentinel"
@@ -32,6 +33,34 @@
 
     <MajorUpgrade DowngradeErrorMessage="A newer version of Secbox Sentinel is already installed." />
     <MediaTemplate EmbedCab="yes" />
+
+    <!--
+      ARP icon (Programs and Features). Drop a multi-resolution .ico file
+      named SecboxSentinel.ico in this project directory and the build
+      picks it up. WiX bundles the icon into the MSI; Windows shows it in
+      Settings → Apps and in the Control Panel uninstall list.
+
+      Icon spec: .ico container with 16×16, 32×32, 48×48, and 256×256
+      sizes embedded. 32-bit color + alpha channel.
+    -->
+    <Icon Id="SecboxSentinelIcon" SourceFile="SecboxSentinel.ico" />
+    <Property Id="ARPPRODUCTICON" Value="SecboxSentinelIcon" />
+
+    <!--
+      UI bitmaps. WixUI_Minimal is the smallest dialog set that still
+      renders branding: one combined welcome+install dialog with the
+      banner across the top and the welcome bitmap on the left.
+
+      NOTE: these only render when msiexec runs in full UI mode. The
+      adapter's RunInstaller currently uses /qb+ (basic UI), which
+      bypasses these dialogs. The bitmaps stay embedded in the MSI
+      regardless — anyone who double-clicks the MSI directly sees them.
+      Drop /qb+ from the msiexec args in SentinelInstaller.RunInstaller
+      if you want the branded UI during the in-editor install flow.
+    -->
+    <ui:WixUI Id="WixUI_Minimal" />
+    <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="welcome.bmp" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="SECBOX_ROOT" Name="Secbox">
@@ -91,7 +120,7 @@
           util:ServiceConfig as a Component-level sibling (not nested in
           ServiceInstall) so its deferred CA schedules after the standard
           InstallServices action has registered the service. Nesting it
-          inside ServiceInstall triggers the WiX 4/5 ordering bug.
+          inside ServiceInstall triggers the WiX 5 ordering bug.
         -->
         <util:ServiceConfig ServiceName="SecboxSentinel"
                             FirstFailureActionType="restart"
