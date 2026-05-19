@@ -101,23 +101,66 @@
                TextWrapping="Wrap" />
     </Grid>
 
-    <!-- Footer -->
+    <!-- Footer — two layouts, one shown depending on action mode -->
     <Border Grid.Row="2" Background="{StaticResource Surface}" BorderBrush="{StaticResource Border}" BorderThickness="0,1,0,0">
       <Grid Margin="16,12">
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*" />
-          <ColumnDefinition Width="Auto" />
-        </Grid.ColumnDefinitions>
-        <TextBlock Grid.Column="0"
-                   Text="Full audit trail: %LOCALAPPDATA%\secbox\sentinel-events.log"
-                   Foreground="{StaticResource TextDim}"
-                   FontFamily="Consolas"
-                   FontSize="11"
-                   VerticalAlignment="Center" />
-        <Button Grid.Column="1"
-                Content="Dismiss"
-                Style="{StaticResource DangerButton}"
-                Click="Dismiss_Click" />
+        <!--
+          DecisionPanel: shown when action=="Suspended". The library
+          thread is blocked waiting for our exit code. Four buttons:
+            Allow (1) — let this call through, prompt again next time
+            Allow & Trust (2) — let through + persist library to trust list
+            Kill (3) — Environment.Exit(1) the editor
+            Kill & Remove library (4) — disabled placeholder
+          Closing the window without clicking → exit code 0 = Block.
+        -->
+        <StackPanel x:Name="DecisionPanel"
+                    Orientation="Vertical"
+                    Visibility="Collapsed">
+          <TextBlock Text="The editor's calling thread is SUSPENDED. The library cannot continue until you choose."
+                     Foreground="{StaticResource DangerLight}"
+                     FontWeight="SemiBold"
+                     FontSize="12"
+                     Margin="0,0,0,8" />
+          <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button x:Name="BtnAllow"
+                    Content="Allow once"
+                    Margin="0,0,8,0"
+                    Click="Allow_Click" />
+            <Button x:Name="BtnAllowTrust"
+                    Content="Allow &amp; Trust library"
+                    Margin="0,0,8,0"
+                    Click="AllowTrust_Click" />
+            <Button x:Name="BtnKill"
+                    Content="Kill editor"
+                    Margin="0,0,8,0"
+                    Style="{StaticResource DangerButton}"
+                    Click="Kill_Click" />
+            <Button x:Name="BtnKillRemove"
+                    Content="Kill &amp; remove library"
+                    IsEnabled="False"
+                    ToolTip="Not implemented yet — coming in a future release"
+                    Style="{StaticResource DangerButton}"
+                    Click="KillRemove_Click" />
+          </StackPanel>
+        </StackPanel>
+
+        <!-- DismissPanel: shown for already-resolved findings (action="Blocked" or "Detected") -->
+        <Grid x:Name="DismissPanel" Visibility="Collapsed">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+          </Grid.ColumnDefinitions>
+          <TextBlock Grid.Column="0"
+                     Text="Full audit trail: %LOCALAPPDATA%\secbox\sentinel-events.log"
+                     Foreground="{StaticResource TextDim}"
+                     FontFamily="Consolas"
+                     FontSize="11"
+                     VerticalAlignment="Center" />
+          <Button Grid.Column="1"
+                  Content="Dismiss"
+                  Style="{StaticResource DangerButton}"
+                  Click="Dismiss_Click" />
+        </Grid>
       </Grid>
     </Border>
   </Grid>

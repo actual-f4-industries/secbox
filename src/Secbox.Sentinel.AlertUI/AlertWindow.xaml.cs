@@ -6,10 +6,14 @@ namespace Secbox.Sentinel.AlertUI;
 
 public partial class AlertWindow : Window
 {
+    readonly AlertPayload _payload;
+
     public AlertWindow(AlertPayload payload)
     {
         InitializeComponent();
+        _payload = payload;
         Populate(payload);
+        SelectFooter(payload);
     }
 
     void Populate(AlertPayload p)
@@ -26,10 +30,7 @@ public partial class AlertWindow : Window
         PidText.Text     = p.Pid > 0 ? p.Pid.ToString(CultureInfo.InvariantCulture) : "(unknown)";
 
         NoteBox.Text = string.IsNullOrEmpty(p.Note)
-            ? "Runtime monitoring intercepted a library-attributed call classified as Critical. "
-              + "The call has been recorded in the audit log. If the policy was configured to block, "
-              + "the underlying action did not execute and the calling library will observe a null/false "
-              + "return value (and may throw on the next member access)."
+            ? DefaultNote(p)
             : p.Note;
 
         SubtitleText.Text = string.IsNullOrEmpty(p.CallerAssembly)
@@ -37,16 +38,48 @@ public partial class AlertWindow : Window
             : $"Detected from library: {p.CallerAssembly}";
     }
 
+    static string DefaultNote(AlertPayload p) =>
+        IsSuspended(p)
+            ? "The editor's calling thread is blocked inside Tier E's Harmony prefix until "
+                + "you choose. Allow lets this call run once; Allow & Trust persists the library "
+                + "in %LOCALAPPDATA%\\secbox\\managed-call-trust.json and future calls skip this "
+                + "prompt; Kill terminates the editor (you lose unsaved work)."
+            : "Runtime monitoring intercepted a library-attributed call classified as Critical. "
+                + "The call has been recorded in the audit log.";
+
+    // Suspended mode shows the decision panel (Allow/Trust/Kill/Remove).
+    // Already-resolved findings (Detected, Blocked) show the Dismiss footer.
+    static bool IsSuspended(AlertPayload p) =>
+        string.Equals(p.Action, "Suspended", StringComparison.OrdinalIgnoreCase);
+
+    void SelectFooter(AlertPayload p)
+    {
+        if (IsSuspended(p))
+        {
+            DecisionPanel.Visibility = Visibility.Visible;
+            DismissPanel.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            DecisionPanel.Visibility = Visibility.Collapsed;
+            DismissPanel.Visibility = Visibility.Visible;
+        }
+    }
+
+    // ──────────── Decision-panel handlers (Suspended mode) ────────────
+    void Allow_Click(object sender, RoutedEventArgs e)        => Application.Current.Shutdown(AlertDecision.Allow);
+    void AllowTrust_Click(object sender, RoutedEventArgs e)   => Application.Current.Shutdown(AlertDecision.AllowAndTrust);
+    void Kill_Click(object sender, RoutedEventArgs e)         => Application.Current.Shutdown(AlertDecision.Kill);
+    void KillRemove_Click(object sender, RoutedEventArgs e)   => Application.Current.Shutdown(AlertDecision.KillAndRemove);
+
+    // ──────────── Dismiss-panel handler (informational mode) ───────────
+    void Dismiss_Click(object sender, RoutedEventArgs e)      => Application.Current.Shutdown(AlertDecision.Block);
+
     static string FormatTime(string? iso)
     {
         if (string.IsNullOrEmpty(iso)) return "(unknown)";
         if (DateTimeOffset.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt))
             return dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
         return iso;
-    }
-
-    void Dismiss_Click(object sender, RoutedEventArgs e)
-    {
-        Close();
     }
 }

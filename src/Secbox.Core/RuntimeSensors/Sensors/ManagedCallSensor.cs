@@ -47,6 +47,7 @@ public sealed class ManagedCallSensor : ISensor
     static ChannelWriter<SensorEvent>? _sink;
     static long _sequence;
     static EnforcementPolicy _policy = new();
+    static ManagedCallTrustStore _trust = new();
     // Diagnostic counter — total times the Process.Start prefix has run
     // since attach. Read by tests / status panels to confirm patching
     // actually took effect (Harmony is meant to be invisible, but when
@@ -63,6 +64,7 @@ public sealed class ManagedCallSensor : ISensor
         {
             _sink = sink;
             _policy = options.Enforcement ?? new EnforcementPolicy();
+            _trust = ManagedCallTrustStore.Load();
             _harmony = new Harmony(HarmonyId);
             PatchProcessStart(_harmony);
             Status = SensorStatus.Healthy;
@@ -152,9 +154,21 @@ public sealed class ManagedCallSensor : ISensor
 
             if (_policy.BlockLibraryProcessStart)
             {
+                if (_trust.IsTrusted(lib.AssemblyName))
+                {
+                    // Previously trusted via "Allow & Trust" — skip prompt.
+                    __state = lib;
+                    return true;
+                }
+
+                var decision = SuspendAndDecide(lib);
+                if (ApplyDecision(decision, lib))
+                {
+                    __state = lib;
+                    return true; // user chose Allow — original runs
+                }
                 __result = null;
-                EmitBlocked(lib);
-                return false;
+                return false; // Block / Kill (kill already exited)
             }
 
             __state = lib;
@@ -190,8 +204,19 @@ public sealed class ManagedCallSensor : ISensor
 
             if (_policy.BlockLibraryProcessStart)
             {
+                if (_trust.IsTrusted(lib.AssemblyName))
+                {
+                    __state = lib;
+                    return true;
+                }
+
+                var decision = SuspendAndDecide(lib);
+                if (ApplyDecision(decision, lib))
+                {
+                    __state = lib;
+                    return true;
+                }
                 __result = false;
-                EmitBlocked(lib);
                 return false;
             }
 
@@ -265,6 +290,190 @@ public sealed class ManagedCallSensor : ISensor
             Op = "Process.Start",
             ArgsSummary = null,
         });
+    }
+
+    // Decision codes returned by SecboxAlertUI as its exit code. Mirror
+    // of Secbox.Sentinel.AlertUI.AlertDecision — kept in sync manually
+    // because the projects don't share a reference.
+    static class Decision
+    {
+        public const int Block         = 0;
+        public const int Allow         = 1;
+        public const int AllowAndTrust = 2;
+        public const int Kill          = 3;
+        public const int KillAndRemove = 4;
+    }
+
+    // Synchronously launch AlertUI with the suspension payload and wait
+    // up to 10 minutes for the user's exit code. The library's calling
+    // thread is blocked inside this method — that IS the suspension.
+    // Library code cannot proceed past Process.Start until we return.
+    //
+    // 10 minute timeout: if the user goes AFK or AlertUI hangs, we fall
+    // back to Block (safest). Block is also the exit code AlertUI emits
+    // when the user closes the window without clicking a button.
+    static int SuspendAndDecide(LibraryAttribution lib)
+    {
+        // 1. Emit the SensorEvent for audit (channel/correlator/log).
+        EmitSuspended(lib);
+
+        // 2. Drop the payload JSON next to where AlertUI expects it.
+        var payloadPath = WriteSuspendPayload(lib);
+        if (payloadPath == null) return Decision.Block; // can't ask, fail safe
+
+        // 3. Resolve AlertUI exe — same folder as this assembly.
+        var exe = ResolveAlertUiPath();
+        if (string.IsNullOrEmpty(exe))
+        {
+            TryCleanupPayload(payloadPath);
+            return Decision.Block;
+        }
+
+        // 4. Synchronous launch + wait.
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = exe,
+                UseShellExecute = false,
+                CreateNoWindow = false,
+                WorkingDirectory = Path.GetDirectoryName(exe),
+            };
+            psi.ArgumentList.Add(payloadPath);
+
+            using var p = Process.Start(psi);
+            if (p == null) return Decision.Block;
+
+            if (!p.WaitForExit((int)TimeSpan.FromMinutes(10).TotalMilliseconds))
+            {
+                try { p.Kill(entireProcessTree: true); } catch { }
+                return Decision.Block;
+            }
+            return p.ExitCode;
+        }
+        catch
+        {
+            return Decision.Block;
+        }
+        finally
+        {
+            TryCleanupPayload(payloadPath);
+        }
+    }
+
+    // Translate user's decision into an action. Returns true if the
+    // original method should run, false if it should be skipped.
+    static bool ApplyDecision(int decision, LibraryAttribution lib)
+    {
+        switch (decision)
+        {
+            case Decision.Allow:
+                return true;
+
+            case Decision.AllowAndTrust:
+                _trust.Trust(lib.AssemblyName);
+                return true;
+
+            case Decision.Kill:
+                // Hard exit. Library code never resumes. Editor terminates.
+                // User loses unsaved work — that's the price of intercept.
+                try { _sink?.TryWrite(BuildKillEvent(lib)); } catch { }
+                Environment.Exit(1);
+                return false; // unreachable
+
+            case Decision.KillAndRemove:
+                // Not implemented yet — UI button is disabled. If somehow
+                // selected, fall through to Kill semantics (safer than
+                // silently doing nothing or doing a half-implemented remove).
+                try { _sink?.TryWrite(BuildKillEvent(lib)); } catch { }
+                Environment.Exit(1);
+                return false;
+
+            case Decision.Block:
+            default:
+                EmitBlocked(lib);
+                return false;
+        }
+    }
+
+    static string? WriteSuspendPayload(LibraryAttribution lib)
+    {
+        try
+        {
+            var dropDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                "secbox", "alerts");
+            Directory.CreateDirectory(dropDir);
+            var path = Path.Combine(dropDir,
+                $"suspend-{DateTime.UtcNow:yyyyMMddTHHmmssfff}-{Guid.NewGuid():N}.json");
+            var json = JsonSerializer.Serialize(new
+            {
+                severity = "Critical",
+                kind = "ManagedProcessStart",
+                target = $"{lib.AssemblyName}!{lib.MethodName}",
+                callerAssembly = lib.AssemblyName,
+                callerMethod = lib.MethodName,
+                timestamp = DateTimeOffset.UtcNow.ToString("O"),
+                pid = Environment.ProcessId,
+                action = "Suspended",
+                note = (string?)null,
+            });
+            File.WriteAllText(path, json);
+            return path;
+        }
+        catch { return null; }
+    }
+
+    static void TryCleanupPayload(string path)
+    {
+        try { if (File.Exists(path)) File.Delete(path); } catch { }
+    }
+
+    static string? ResolveAlertUiPath()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(typeof(ManagedCallSensor).Assembly.Location);
+            if (string.IsNullOrEmpty(dir)) return null;
+            var exe = Path.Combine(dir, "SecboxAlertUI.exe");
+            return File.Exists(exe) ? exe : null;
+        }
+        catch { return null; }
+    }
+
+    static SensorEvent BuildKillEvent(LibraryAttribution lib) => new(
+        Sequence: Interlocked.Increment(ref _sequence),
+        SensorId: "managed-call",
+        Kind: SensorEventKind.BlockedManagedProcessStart,
+        Timestamp: DateTimeOffset.UtcNow,
+        Pid: Environment.ProcessId,
+        Tid: Environment.CurrentManagedThreadId,
+        Target: $"{lib.AssemblyName}!{lib.MethodName}",
+        PayloadJson: JsonSerializer.Serialize(new
+        {
+            library = lib.AssemblyName,
+            method = lib.MethodName,
+            action = "Killed",
+            reason = "user chose Kill from AlertUI suspension dialog",
+        }));
+
+    static void EmitSuspended(LibraryAttribution lib)
+    {
+        _sink?.TryWrite(new SensorEvent(
+            Sequence: Interlocked.Increment(ref _sequence),
+            SensorId: "managed-call",
+            Kind: SensorEventKind.ManagedProcessStart,
+            Timestamp: DateTimeOffset.UtcNow,
+            Pid: Environment.ProcessId,
+            Tid: Environment.CurrentManagedThreadId,
+            Target: $"{lib.AssemblyName}!{lib.MethodName}",
+            PayloadJson: JsonSerializer.Serialize(new
+            {
+                library = lib.AssemblyName,
+                method = lib.MethodName,
+                action = "Suspended",
+                reason = "calling thread suspended pending user decision",
+            })));
     }
 
     // Emit a Critical-severity finding indicating the library's spawn was
