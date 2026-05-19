@@ -235,7 +235,7 @@ public sealed class ManagedCallSensor : ISensor
             if (IsInternalAssembly(asmName)) continue;
 
             var path = TryGetAssemblyLocation(asm);
-            if (!IsLibraryAttributable(asmName, path)) continue;
+            if (!IsLibraryAttributable(asm, asmName, path)) continue;
 
             return new LibraryAttribution
             {
@@ -371,12 +371,32 @@ public sealed class ManagedCallSensor : ISensor
         || name.StartsWith("netstandard", StringComparison.OrdinalIgnoreCase)
         || name.Equals("mscorlib", StringComparison.OrdinalIgnoreCase);
 
-    // A frame is "library-attributable" when the assembly was loaded from a
-    // library directory the editor scans (`\Libraries\` source or `\.bin\`
-    // compiled output) OR the assembly name carries s&box's `package.`
-    // prefix (see Compiler.cs:98 in sbox-public).
-    static bool IsLibraryAttributable(string asmName, string? path)
+    // A frame is "library-attributable" when ANY of these match:
+    //
+    //   1. The assembly's AssemblyLoadContext is an IsolatedAssemblyContext
+    //      — s&box loads each downloaded package into its own
+    //      collectible ALC named "IsolatedAssemblyContext" (see
+    //      Sandbox.Reflection/TypeLibrary/LoadContext.cs:15). MOST RELIABLE
+    //      signal because it survives in-memory loads, custom AssemblyName,
+    //      and non-canonical paths.
+    //   2. The assembly name carries s&box's runtime-compiler `package.`
+    //      prefix (Compiler.cs:98 in sbox-public). Catches packages loaded
+    //      via the runtime compiler path.
+    //   3. The assembly was loaded from a library directory on disk
+    //      (`\Libraries\` source tree or `\.bin\` compiled output). Catches
+    //      libraries loaded from files when ALC and naming don't match.
+    static bool IsLibraryAttributable(Assembly asm, string asmName, string? path)
     {
+        try
+        {
+            var alc = System.Runtime.Loader.AssemblyLoadContext.GetLoadContext(asm);
+            // Library packages live in IsolatedAssemblyContext (per-package
+            // collectible). Engine code lives in the default ALC ("") or
+            // s&box's shared TLC. Tier B (profiler) sees the same boundary.
+            if (alc != null && alc.Name == "IsolatedAssemblyContext") return true;
+        }
+        catch { /* GetLoadContext can throw on dynamic / collectible quirks */ }
+
         if (asmName.StartsWith("package.", StringComparison.OrdinalIgnoreCase)) return true;
         if (string.IsNullOrEmpty(path)) return false;
         return path.IndexOf(@"\Libraries\", StringComparison.OrdinalIgnoreCase) >= 0
