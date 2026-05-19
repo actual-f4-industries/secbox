@@ -28,9 +28,22 @@ public sealed class EtwSensor : ISensor
         Status = SensorStatus.Starting;
         try
         {
+            // Bounded reconnect — Tier A is non-critical, must NEVER hang the
+            // editor when the Sentinel pipe is unreachable. Default policy
+            // retries indefinitely with exponential backoff, which holds the
+            // adapter's _attachLock forever and breaks Detach/ReapplySettings.
+            // 3 attempts × ~5s each = ~16 seconds worst case before we
+            // surface Status=Failed and let the editor proceed.
+            var reconnect = new Sentinel.Client.ReconnectPolicy
+            {
+                InitialDelay = TimeSpan.FromMilliseconds(100),
+                MaxDelay = TimeSpan.FromSeconds(1),
+                MaxAttempts = 3,
+            };
             _client = new SentinelClient(
                 editorPid: options.EditorPid,
-                clientBuild: typeof(EtwSensor).Assembly.GetName().Version?.ToString() ?? "0.0.0");
+                clientBuild: typeof(EtwSensor).Assembly.GetName().Version?.ToString() ?? "0.0.0",
+                reconnect: reconnect);
             await _client.ConnectAsync(ct).ConfigureAwait(false);
 
             var providers = MapCapabilitiesToProviders(options.Desired);
