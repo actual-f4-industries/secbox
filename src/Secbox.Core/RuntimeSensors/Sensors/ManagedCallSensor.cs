@@ -317,7 +317,13 @@ public sealed class ManagedCallSensor : ISensor
         // 1. Emit the SensorEvent for audit (channel/correlator/log).
         EmitSuspended(lib);
 
-        // 2. Drop the payload JSON next to where AlertUI expects it.
+        // 2. Write the payload to a PRIVATE temp path and pass it directly to
+        //    the child we launch + wait on below. It must NOT go into the
+        //    AlertSpawner drop folder (%PROGRAMDATA%\secbox\alerts): that
+        //    folder is watched by the service, which would launch a SECOND,
+        //    fire-and-forget AlertUI whose exit code is discarded — and which
+        //    races this child to read+delete the single payload file, leaving
+        //    the loser to abort with "payload missing" (exit 1 == Allow).
         var payloadPath = WriteSuspendPayload(lib);
         if (payloadPath == null) return Decision.Block; // can't ask, fail safe
 
@@ -400,9 +406,11 @@ public sealed class ManagedCallSensor : ISensor
     {
         try
         {
-            var dropDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-                "secbox", "alerts");
+            // Private per-user temp dir — deliberately NOT the AlertSpawner
+            // watched folder. The synchronous in-process child reads this by
+            // absolute path; the service must never see it (see SuspendAndDecide
+            // step 2 for why a shared drop causes a duplicate dialog + file race).
+            var dropDir = Path.Combine(Path.GetTempPath(), "secbox", "suspend");
             Directory.CreateDirectory(dropDir);
             var path = Path.Combine(dropDir,
                 $"suspend-{DateTime.UtcNow:yyyyMMddTHHmmssfff}-{Guid.NewGuid():N}.json");

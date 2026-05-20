@@ -68,16 +68,31 @@
             Condition="'$(SECBOX_SKIP_DEVDROP)' != '1' AND '$(OS)' == 'Windows_NT'">
         <PropertyGroup>
             <SecboxDevDropPath>$(LOCALAPPDATA)\secbox\core\dev</SecboxDevDropPath>
+            <!--
+                ManagedCallSensor.ResolveAlertUiPath looks for SecboxAlertUI.exe
+                NEXT TO Secbox.Core.dll. Without it in the dev-drop, every
+                library-attributed Process.Start suspension silently falls back
+                to Block (no in-process launch, no thread halt) and the only
+                dialog the user sees is the service's button-less "Blocked"
+                notification. Copy the self-contained single-file publish exe
+                so the suspend decision dialog actually launches in dev mode.
+                Publish it once with:
+                  dotnet publish src/Secbox.Sentinel.AlertUI -c $(Configuration)
+            -->
+            <SecboxAlertUiExe>$(MSBuildThisFileDirectory)..\Secbox.Sentinel.AlertUI\bin\$(Configuration)\net10.0-windows\win-x64\publish\SecboxAlertUI.exe</SecboxAlertUiExe>
         </PropertyGroup>
         <MakeDir Directories="$(SecboxDevDropPath)" />
         <ItemGroup>
             <SecboxDevDropFiles Include="$(OutputPath)*.dll" />
             <SecboxDevDropFiles Include="$(OutputPath)*.pdb" />
+            <SecboxDevDropFiles Include="$(SecboxAlertUiExe)" Condition="Exists('$(SecboxAlertUiExe)')" />
         </ItemGroup>
         <Copy SourceFiles="@(SecboxDevDropFiles)"
               DestinationFolder="$(SecboxDevDropPath)"
               SkipUnchangedFiles="true" />
         <Message Importance="high" Text="secbox dev-drop: copied $(SecboxDevDropFiles->Count()) files to $(SecboxDevDropPath)" />
+        <Warning Condition="!Exists('$(SecboxAlertUiExe)')"
+                 Text="secbox dev-drop: SecboxAlertUI.exe not found at $(SecboxAlertUiExe) — the ManagedCallSensor suspend dialog will fall back to Block until you run: dotnet publish src/Secbox.Sentinel.AlertUI -c $(Configuration)" />
     </Target>
 
 </Project>

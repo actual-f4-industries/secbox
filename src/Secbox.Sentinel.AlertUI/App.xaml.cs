@@ -68,6 +68,6 @@ public sealed class AlertPayload
     public string? CallerMethod { get; set; }
     public string? Timestamp { get; set; }
     public int Pid { get; set; }
-    public string? Action { get; set; }    // "Blocked" | "Detected"
+    public string? Action { get; set; }    // "Suspended" (decision panel) | "Blocked" | "Detected"
     public string? Note { get; set; }
 }
