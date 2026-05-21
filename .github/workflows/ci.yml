@@ -24,8 +24,9 @@ jobs:
       - name: Restore
         run: dotnet restore Secbox.slnx
 
-      - name: Build (no native profiler embed — CI build, not release)
+      - name: Build (Release)
         env:
+          # Skip the post-build dev-drop copy (see Secbox.Core.csproj) — this is CI, not a dev machine.
           SECBOX_SKIP_DEVDROP: "1"
         run: dotnet build Secbox.slnx -c Release --no-restore
 
@@ -36,16 +37,3 @@ jobs:
           } else {
             Write-Host "No tests/ directory yet — skipping"
           }
-
-  build-profiler:
-    name: Build native profiler (sanity)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Fetch CoreCLR headers
-        shell: pwsh
-        run: ./src/Secbox.Profiler/scripts/fetch-coreclr-headers.ps1
-      - name: Configure
-        run: cmake -S src/Secbox.Profiler -B src/Secbox.Profiler/build -A x64 -DCMAKE_BUILD_TYPE=Release
-      - name: Build
-        run: cmake --build src/Secbox.Profiler/build --config Release
