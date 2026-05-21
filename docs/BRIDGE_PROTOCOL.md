@@ -115,7 +115,7 @@ Pass `null` or empty string for default options + policy.
 
 ### Severity enum
 
-`"Info" | "Low" | "Medium" | "High" | "Critical"` — JSON string (configured via `JsonStringEnumConverter`).
+`"Info" | "Low" | "Medium" | "High" | "Critical"` - JSON string (configured via `JsonStringEnumConverter`).
 
 ### Decision enum
 
