@@ -45,7 +45,9 @@
       "Bash(python -c \"import yaml,sys; [print\\(f, '->', 'OK' if yaml.safe_load\\(open\\(f, encoding='utf-8'\\)\\) else 'EMPTY'\\) for f in ['.github/workflows/ci.yml','.github/workflows/release.yml']]\")",
       "PowerShell(New-Item *)",
       "PowerShell(Get-ChildItem *)",
-      "Bash(SECBOX_SKIP_DEVDROP=1 dotnet build src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj -c Release)"
+      "Bash(SECBOX_SKIP_DEVDROP=1 dotnet build src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj -c Release)",
+      "Bash(git switch *)",
+      "Bash(git add *)"
     ]
   }
 }
