@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Windows;
+using System.Windows.Input;
 
 namespace Secbox.Sentinel.AlertUI;
 
@@ -70,10 +71,42 @@ public partial class AlertWindow : Window
     void Allow_Click(object sender, RoutedEventArgs e)        => Application.Current.Shutdown(AlertDecision.Allow);
     void AllowTrust_Click(object sender, RoutedEventArgs e)   => Application.Current.Shutdown(AlertDecision.AllowAndTrust);
     void Kill_Click(object sender, RoutedEventArgs e)         => Application.Current.Shutdown(AlertDecision.Kill);
-    void KillRemove_Click(object sender, RoutedEventArgs e)   => Application.Current.Shutdown(AlertDecision.KillAndRemove);
+
+    // Destructive + irreversible: confirm before terminating the editor and
+    // deleting the library from disk. Cancel leaves the thread still suspended
+    // so the user can pick a softer option.
+    void KillRemove_Click(object sender, RoutedEventArgs e)
+    {
+        var lib = string.IsNullOrEmpty(_payload.CallerAssembly) ? "this library" : _payload.CallerAssembly;
+        var confirm = MessageBox.Show(
+            this,
+            "This will terminate the editor and permanently delete the library:\n\n"
+            + $"    {lib}\n\n"
+            + "from this project's Libraries folder. Any unsaved work is lost. Files the "
+            + "editor still has open are deleted the next time it starts.\n\nContinue?",
+            "secbox — kill & remove library",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning,
+            MessageBoxResult.No);
+
+        if (confirm == MessageBoxResult.Yes)
+            Application.Current.Shutdown(AlertDecision.KillAndRemove);
+    }
 
     // ──────────── Dismiss-panel handler (informational mode) ───────────
     void Dismiss_Click(object sender, RoutedEventArgs e)      => Application.Current.Shutdown(AlertDecision.Block);
+
+    // ──────────── Custom chrome (WindowStyle=None) ────────────
+    // Drag the title bar to move the borderless window.
+    void TitleBar_MouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ButtonState != MouseButtonState.Pressed) return;
+        try { DragMove(); } catch { /* DragMove throws if the button released mid-call — ignore */ }
+    }
+
+    // ✕ in the title bar. Closing == Block (exit 0): the documented fail-safe
+    // when the user dismisses without making an explicit decision.
+    void Close_Click(object sender, RoutedEventArgs e) => Close();
 
     static string FormatTime(string? iso)
     {

@@ -15,5 +15,5 @@ public static class AlertDecision
     public const int Allow            = 1;
     public const int AllowAndTrust    = 2;
     public const int Kill             = 3;
-    public const int KillAndRemove    = 4; // disabled in UI; reserved
+    public const int KillAndRemove    = 4; // kill editor + delete the offending library from disk
 }

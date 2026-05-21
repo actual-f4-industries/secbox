@@ -74,6 +74,11 @@ public sealed class ManagedCallSensor : ISensor
             _sink = sink;
             _policy = options.Enforcement ?? new EnforcementPolicy();
             _trust = ManagedCallTrustStore.Load();
+            // Finish any library deletions deferred by a previous "Kill & remove
+            // library" decision. The editor that requested them has since exited
+            // (that decision Environment.Exit'd it), so the file locks that
+            // blocked the immediate delete are now gone.
+            CompletePendingRemovals();
             Trace("──────── ATTACH ────────");
             Trace($"StartAsync: Secbox.Core at '{SafeAsmLocation()}' (dev-drop path = dev mode active)");
             Trace($"StartAsync: BlockLibraryProcessStart={_policy.BlockLibraryProcessStart}, editorPid={Environment.ProcessId}");
@@ -193,7 +198,7 @@ public sealed class ManagedCallSensor : ISensor
 
                 Trace($"  enforce ON → SuspendAndDecide: {lib.AssemblyName}!{lib.MethodName}");
                 var decision = SuspendAndDecide(lib);
-                Trace($"  SuspendAndDecide returned {decision} (0=Block 1=Allow 2=Trust 3=Kill)");
+                Trace($"  SuspendAndDecide returned {decision} (0=Block 1=Allow 2=Trust 3=Kill 4=Kill+Remove)");
                 if (ApplyDecision(decision, lib))
                 {
                     __state = lib;
@@ -249,7 +254,7 @@ public sealed class ManagedCallSensor : ISensor
 
                 Trace($"  enforce ON → SuspendAndDecide: {lib.AssemblyName}!{lib.MethodName}");
                 var decision = SuspendAndDecide(lib);
-                Trace($"  SuspendAndDecide returned {decision} (0=Block 1=Allow 2=Trust 3=Kill)");
+                Trace($"  SuspendAndDecide returned {decision} (0=Block 1=Allow 2=Trust 3=Kill 4=Kill+Remove)");
                 if (ApplyDecision(decision, lib))
                 {
                     __state = lib;
@@ -473,18 +478,151 @@ public sealed class ManagedCallSensor : ISensor
                 return false; // unreachable
 
             case Decision.KillAndRemove:
-                // Not implemented yet — UI button is disabled. If somehow
-                // selected, fall through to Kill semantics (safer than
-                // silently doing nothing or doing a half-implemented remove).
-                try { _sink?.TryWrite(BuildKillEvent(lib)); } catch { }
+                // Delete the offending library from disk, THEN terminate the
+                // editor. Removal runs before the exit so the attempt — and any
+                // deferral of locked files to the next start — completes while
+                // we're still alive. CompletePendingRemovals (next attach)
+                // finishes anything the live editor still had locked.
+                string removeOutcome;
+                try { removeOutcome = TryRemoveLibrary(lib); }
+                catch (Exception ex) { removeOutcome = $"remove threw {ex.GetType().Name}: {ex.Message}"; }
+                Trace($"  KillAndRemove: {removeOutcome}");
+                try { _sink?.TryWrite(BuildKillEvent(lib, removed: true, removeOutcome)); } catch { }
                 Environment.Exit(1);
-                return false;
+                return false; // unreachable
 
             case Decision.Block:
             default:
                 EmitBlocked(lib);
                 return false;
         }
+    }
+
+    // ───────────────────── Kill & remove library ─────────────────────
+    // "Kill & remove library" (AlertDecision 4): delete the offending library's
+    // folder from disk so it cannot run again, then Environment.Exit the editor.
+    //
+    // The delete races the live editor, which may still hold the compiled
+    // assembly locked. Strategy: try an immediate recursive delete (succeeds
+    // outright when s&box loaded the package in-memory / from a folder it
+    // doesn't lock); if that throws, record the folder in a marker that
+    // CompletePendingRemovals finishes on the NEXT attach — by then this
+    // process has exited and freed the lock. No admin and no reboot required.
+
+    // Resolve the …\Libraries\<name> folder for the attributed assembly, or null
+    // when the assembly isn't under a Libraries\ tree (engine code, or an
+    // in-memory load with no on-disk path). Walking up until the PARENT is
+    // "Libraries" means we can only ever return a direct child of Libraries\ —
+    // never Libraries\ itself, never anything above it.
+    static string? ResolveLibraryRoot(string assemblyPath)
+    {
+        try
+        {
+            var full = Path.GetFullPath(assemblyPath);
+            var dir = File.Exists(full)
+                ? new DirectoryInfo(Path.GetDirectoryName(full)!)
+                : new DirectoryInfo(full);
+            while (dir?.Parent != null)
+            {
+                if (string.Equals(dir.Parent.Name, "Libraries", StringComparison.OrdinalIgnoreCase))
+                    return dir.FullName;
+                dir = dir.Parent;
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    // Authoritative delete gate: true only when `path` is exactly a direct child
+    // of a folder named "Libraries". Every Directory.Delete in this file is
+    // guarded by this, so a malformed or forged path can never escape the
+    // library tree.
+    static bool IsDeletableLibraryRoot(string path)
+    {
+        try
+        {
+            var dir = new DirectoryInfo(Path.GetFullPath(path));
+            return dir.Parent != null
+                && string.Equals(dir.Parent.Name, "Libraries", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    static string TryRemoveLibrary(LibraryAttribution lib)
+    {
+        var path = lib.AssemblyPath;
+        if (string.IsNullOrEmpty(path))
+            return "attributed assembly has no on-disk path (in-memory load) — cannot locate a library folder; editor killed without removal";
+
+        var root = ResolveLibraryRoot(path);
+        if (root == null || !IsDeletableLibraryRoot(root))
+            return $"attributed assembly is not inside a \\Libraries\\<name>\\ folder — refused to delete anything (path='{path}')";
+
+        if (!Directory.Exists(root))
+            return $"library folder already gone: '{root}'";
+
+        try
+        {
+            Directory.Delete(root, recursive: true);
+            return $"deleted library folder '{root}'";
+        }
+        catch (Exception ex)
+        {
+            // Editor still holds a handle (usually the compiled assembly under
+            // \.bin\). Defer the remainder to the next attach, after we've exited.
+            WritePendingRemoval(root);
+            return $"library folder '{root}' is in use ({ex.GetType().Name}); "
+                 + "remaining files scheduled for deletion on next editor start";
+        }
+    }
+
+    // Marker file of library folders awaiting deletion — one absolute path per
+    // line, alongside the trace log under %LOCALAPPDATA%\secbox.
+    static readonly string PendingRemovalsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "secbox", "pending-removals.txt");
+
+    static void WritePendingRemoval(string libraryRoot)
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(PendingRemovalsPath);
+            if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+            File.AppendAllText(PendingRemovalsPath, libraryRoot + Environment.NewLine);
+        }
+        catch (Exception ex) { Trace($"WritePendingRemoval: {ex.GetType().Name}: {ex.Message}"); }
+    }
+
+    // Runs on every attach. Completes deletions a previous "Kill & remove
+    // library" couldn't finish because the requesting editor still had the
+    // assembly locked; that editor has since exited, so the folders can go now.
+    // Re-validates every path against IsDeletableLibraryRoot — the marker file
+    // is never trusted blindly.
+    static void CompletePendingRemovals()
+    {
+        try
+        {
+            if (!File.Exists(PendingRemovalsPath)) return;
+
+            var remaining = new List<string>();
+            foreach (var raw in File.ReadAllLines(PendingRemovalsPath))
+            {
+                var root = raw.Trim();
+                if (root.Length == 0) continue;
+                if (!IsDeletableLibraryRoot(root))
+                {
+                    Trace($"CompletePendingRemovals: skip non-library path '{root}'");
+                    continue;
+                }
+                if (!Directory.Exists(root)) { Trace($"CompletePendingRemovals: already gone '{root}'"); continue; }
+                try { Directory.Delete(root, recursive: true); Trace($"CompletePendingRemovals: deleted '{root}'"); }
+                catch (Exception ex) { Trace($"CompletePendingRemovals: still locked '{root}' ({ex.Message}) — keep for next start"); remaining.Add(root); }
+            }
+
+            if (remaining.Count == 0) File.Delete(PendingRemovalsPath);
+            else File.WriteAllLines(PendingRemovalsPath, remaining);
+        }
+        catch (Exception ex) { Trace($"CompletePendingRemovals: {ex.GetType().Name}: {ex.Message}"); }
     }
 
     static string? WriteSuspendPayload(LibraryAttribution lib)
@@ -534,7 +672,7 @@ public sealed class ManagedCallSensor : ISensor
         catch { return null; }
     }
 
-    static SensorEvent BuildKillEvent(LibraryAttribution lib) => new(
+    static SensorEvent BuildKillEvent(LibraryAttribution lib, bool removed = false, string? removeOutcome = null) => new(
         Sequence: Interlocked.Increment(ref _sequence),
         SensorId: "managed-call",
         Kind: SensorEventKind.BlockedManagedProcessStart,
@@ -546,8 +684,11 @@ public sealed class ManagedCallSensor : ISensor
         {
             library = lib.AssemblyName,
             method = lib.MethodName,
-            action = "Killed",
-            reason = "user chose Kill from AlertUI suspension dialog",
+            action = removed ? "KilledAndRemoved" : "Killed",
+            reason = removed
+                ? "user chose Kill & remove library from the AlertUI suspension dialog"
+                : "user chose Kill from the AlertUI suspension dialog",
+            removeOutcome,
         }));
 
     static void EmitSuspended(LibraryAttribution lib)

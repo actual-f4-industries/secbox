@@ -4,19 +4,23 @@
              ShutdownMode="OnLastWindowClose">
   <Application.Resources>
     <!--
-      Dark theme + critical-red accent. Solid colors only — no
-      gradients / images — so the exe starts fast and renders the
-      same on every Windows version we care about.
+      secbox dark theme. Brand palette (background #080d14 / foreground #efefef
+      / accent #07cd8d) supplied by product; surfaces + border derived from it.
+      A critical-red is kept for the severity banner only. Solid colors, no
+      gradients/images on the chrome, so the exe starts fast and renders the
+      same across Windows versions.
     -->
-    <SolidColorBrush x:Key="Background"  Color="#1c1f24" />
-    <SolidColorBrush x:Key="Surface"     Color="#262a31" />
-    <SolidColorBrush x:Key="Border"      Color="#3a3f4a" />
-    <SolidColorBrush x:Key="Text"        Color="#e8eaed" />
-    <SolidColorBrush x:Key="TextDim"     Color="#9aa0a6" />
-    <SolidColorBrush x:Key="Danger"      Color="#8b1a1a" />
+    <SolidColorBrush x:Key="Background"  Color="#080d14" />
+    <SolidColorBrush x:Key="Surface"     Color="#0e1622" />
+    <SolidColorBrush x:Key="Border"      Color="#1c2734" />
+    <SolidColorBrush x:Key="Text"        Color="#efefef" />
+    <SolidColorBrush x:Key="TextDim"     Color="#7e8896" />
+    <SolidColorBrush x:Key="Accent"      Color="#07cd8d" />
+    <SolidColorBrush x:Key="AccentDim"   Color="#0a3f30" />
+    <SolidColorBrush x:Key="Danger"      Color="#a01b1b" />
     <SolidColorBrush x:Key="DangerLight" Color="#f6c6c6" />
-    <SolidColorBrush x:Key="Accent"      Color="#5e89f0" />
 
+    <!-- Flat, rounded base button with hover/disabled affordance. -->
     <Style TargetType="Button">
       <Setter Property="Background" Value="{StaticResource Surface}" />
       <Setter Property="Foreground" Value="{StaticResource Text}" />
@@ -25,6 +29,41 @@
       <Setter Property="Padding" Value="14,6" />
       <Setter Property="FontSize" Value="12" />
       <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="SnapsToDevicePixels" Value="True" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bd"
+                    CornerRadius="3"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}">
+              <ContentPresenter HorizontalAlignment="Center"
+                                VerticalAlignment="Center"
+                                Margin="{TemplateBinding Padding}" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bd" Property="Opacity" Value="0.85" />
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="bd" Property="Opacity" Value="0.70" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="bd" Property="Opacity" Value="0.45" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Primary/accent button (secbox green). -->
+    <Style x:Key="AccentButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+      <Setter Property="Background" Value="{StaticResource Accent}" />
+      <Setter Property="Foreground" Value="#062018" />
+      <Setter Property="BorderBrush" Value="{StaticResource Accent}" />
+      <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
 
     <Style x:Key="DangerButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
@@ -32,6 +71,30 @@
       <Setter Property="Foreground" Value="White" />
       <Setter Property="BorderBrush" Value="{StaticResource Danger}" />
       <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+
+    <!-- Borderless-window title-bar button (the ✕). Flat; reddens on hover. -->
+    <Style x:Key="TitleBarButton" TargetType="Button">
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Foreground" Value="{StaticResource TextDim}" />
+      <Setter Property="BorderThickness" Value="0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="bg" Background="{TemplateBinding Background}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="bg" Property="Background" Value="{StaticResource Danger}" />
+                <Setter Property="Foreground" Value="White" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
   </Application.Resources>
 </Application>

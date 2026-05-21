@@ -39,4 +39,14 @@
         <PublishTrimmed>false</PublishTrimmed>
     </PropertyGroup>
 
+    <!--
+        Brand assets embedded as WPF resources (NOT loose Content) so they ride
+        inside SecboxAlertUI.exe under single-file self-contained publish and
+        resolve via pack URIs (/Assets/#Finlandica Headline, /Assets/secbox-logo.png).
+    -->
+    <ItemGroup>
+        <Resource Include="Assets\secbox-logo.png" />
+        <Resource Include="Assets\FinlandicaHeadline.ttf" />
+    </ItemGroup>
+
 </Project>
