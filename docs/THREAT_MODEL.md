@@ -23,6 +23,20 @@ Concrete attack surface a malicious editor library can exploit:
 | Shipped `.exe`/`.so`/native `.dll` | NativeBinaryFinder |
 | `kernel32`/`powershell`/`VirtualAlloc` literal in IL or source | SuspiciousLiteral detection (IL ldstr + Source string literal) |
 
+### Runtime interception (Tier E)
+
+Beyond static detection, secbox installs a runtime tripwire on
+`System.Diagnostics.Process.Start` inside the editor. A library-attributed
+process spawn **suspends the calling thread** and prompts for a decision - allow
+once, trust, kill the editor, or kill & remove the library. This catches spawns
+that static analysis missed (including those reached via obfuscation or
+dynamically generated code) at the moment they execute, and lets you delete the
+offending library on the spot.
+
+It deliberately targets process spawning - the highest-signal sink - not every
+dangerous API; an in-process attacker can still reach other sinks directly (see
+limitation 2 below).
+
 ## What Secbox cannot defend against
 
 1. **Load-order race.** If a malicious package loaded *before* secbox in this
@@ -50,7 +64,7 @@ Concrete attack surface a malicious editor library can exploit:
 
 4. **Trust footprint of the bridge.** The editor adapter downloads
    `Secbox.Core.dll` from a CDN and loads it in-process. Mitigations:
-   - SHA-256 hash pinned in adapter source — refuses to load mismatch
+   - SHA-256 hash pinned in adapter source - refuses to load mismatch
    - HTTPS-only host
    - Reproducible build of Secbox.Core (publicly auditable)
 
@@ -58,7 +72,7 @@ Concrete attack surface a malicious editor library can exploit:
    acknowledged in the README.
 
 5. **False sense of security.** A "passes secbox" verdict is not a proof of
-   safety — it means "no pattern matched our current rule set". New attack
+   safety - it means "no pattern matched our current rule set". New attack
    vectors require new rules.
 
 ## Trust boundaries
