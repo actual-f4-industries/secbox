@@ -125,9 +125,9 @@ public static class SecboxApi
         try
         {
             var opts = string.IsNullOrWhiteSpace(optionsJson)
-                ? new RuntimeSensorOptions(EnableProfiler: true, EnableEtw: false)
+                ? new RuntimeSensorOptions()
                 : JsonSerializer.Deserialize<RuntimeSensorOptions>(optionsJson, JsonOpts)
-                    ?? new RuntimeSensorOptions(true, false);
+                    ?? new RuntimeSensorOptions();
 
             lock (_runtimeLock)
             {
@@ -141,10 +141,6 @@ public static class SecboxApi
                 newlyCreated = _runtimeSensors;
                 _runtimeSensors.Correlator.AddSink(new JsonLineSink(eventSink));
 
-                if (opts.EnableProfiler)
-                    _runtimeSensors.Add(new ProfilerSensor());
-                if (opts.EnableEtw)
-                    _runtimeSensors.Add(new EtwSensor());
                 if (opts.EnableManagedHook)
                     _runtimeSensors.Add(new ManagedCallSensor());
             }
@@ -225,16 +221,12 @@ public static class SecboxApi
             LastError: s.LastError)).ToList();
     }
 
+    // Enforcement-only: Tier E managed-call hook is the sole sensor. The
+    // detection tiers (B profiler / A ETW) and their kernel knobs were removed.
+    // Extra JSON fields the adapter may still send are ignored on deserialize.
     public sealed record RuntimeSensorOptions(
-        bool EnableProfiler = true,
-        bool EnableEtw = false,
         bool EnableManagedHook = true,
-        SensorCapabilities DesiredCapabilities = SensorCapabilities.ManagedCalls
-            | SensorCapabilities.DynamicCode
-            | SensorCapabilities.KernelFile
-            | SensorCapabilities.KernelProcess
-            | SensorCapabilities.KernelNetwork
-            | SensorCapabilities.NativeImageLoad,
+        SensorCapabilities DesiredCapabilities = SensorCapabilities.ManagedCalls,
         bool CaptureStack = false,
         IReadOnlyList<string>? PathAllowlist = null,
         EnforcementPolicy? Enforcement = null);

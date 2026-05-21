@@ -1,16 +1,15 @@
 name: Release
 
-# Triggered manually or by a v* tag push. Builds every artifact the bridge
-# needs, computes SHA-256s, optionally signs (only if signing secrets are
-# present — unsigned builds work and ship too), and attaches everything to
-# a GitHub Release.
+# Triggered manually or by a v* tag push. Builds the bridge bundle (Secbox.Core
+# + deps + the WPF decision dialog), computes SHA-256s, optionally signs (only
+# if signing secrets are present — unsigned builds work and ship too), and
+# attaches everything to a GitHub Release.
 #
 # Manual SHA-256 hash sync into adapter source:
 #   1. Run this workflow on a tag (e.g. v0.1.0).
 #   2. Download the generated `hashes.txt` artifact from the release.
-#   3. Paste the values into CorePolicy.CoreFiles and ProfilerHashes.cs in
-#      the adapter project tree, then publish the adapter to the s&box
-#      library manager.
+#   3. Paste the values into CorePolicy.CoreFiles in the adapter project tree,
+#      then publish the adapter to the s&box library manager.
 
 on:
   push:
@@ -38,40 +37,9 @@ env:
 jobs:
 
   # -------------------------------------------------------------------------
-  # 1. Build native CLR profiler (win-x64).
-  # -------------------------------------------------------------------------
-  build-profiler:
-    name: Build native profiler (win-x64)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Fetch vendored CoreCLR headers
-        shell: pwsh
-        run: ./src/Secbox.Profiler/scripts/fetch-coreclr-headers.ps1
-
-      - name: Configure (CMake)
-        run: |
-          cmake -S src/Secbox.Profiler -B src/Secbox.Profiler/build `
-                -A x64 -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build src/Secbox.Profiler/build --config Release
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: secbox-profiler-win-x64
-          path: src/Secbox.Profiler/build/Release/secbox-profiler-win-x64.dll
-          if-no-files-found: error
-
-  # -------------------------------------------------------------------------
-  # 2. Build managed bridge stack (Secbox.Core + deps).
-  #    The profiler DLL ships as a separate release asset; the adapter
-  #    downloads + SHA-256-verifies it (CorePolicy.CoreFiles) and drops it
-  #    next to Secbox.Core.dll. Core itself no longer embeds it, so this
-  #    job no longer needs build-profiler as a dependency — both can run
-  #    in parallel.
+  # 1. Build managed bridge stack (Secbox.Core + deps + WPF decision dialog).
+  #    Enforcement-only: the detection tiers (native CLR profiler / Sentinel
+  #    ETW service + MSI) were removed, so this is the only build job.
   # -------------------------------------------------------------------------
   build-managed:
     name: Build managed bridge (Secbox.Core)
@@ -114,16 +82,11 @@ jobs:
             @{ src = $bin;      name = "Secbox.Contracts.dll" },
             @{ src = $bin;      name = "Secbox.Rules.dll" },
             @{ src = $bin;      name = "Secbox.Scanner.dll" },
-            @{ src = $bin;      name = "Secbox.Sentinel.Contracts.dll" },
-            @{ src = $bin;      name = "Secbox.Sentinel.Client.dll" },
             @{ src = $bin;      name = "Mono.Cecil.dll" },
-            @{ src = $bin;      name = "Microsoft.Diagnostics.NETCore.Client.dll" },
             @{ src = $bin;      name = "0Harmony.dll" },
-            # Self-contained single-file: .NET 10 + WPF embedded inside
-            # the exe (~62MB compressed). Works on machines without the
-            # .NET Desktop Runtime installed. Only one file to ship; the
-            # old SecboxAlertUI.{dll,deps.json,runtimeconfig.json} are
-            # embedded and no longer published as siblings.
+            # Self-contained single-file: .NET 10 + WPF embedded inside the exe
+            # (~62MB compressed). Works on machines without the .NET Desktop
+            # Runtime installed. This is Tier E's decision dialog.
             @{ src = $alertBin; name = "SecboxAlertUI.exe" }
           )
           foreach ($f in $files) {
@@ -142,92 +105,7 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
-  # 3. Publish Sentinel service (self-contained win-x64).
-  # -------------------------------------------------------------------------
-  publish-sentinel:
-    name: Publish Sentinel service
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Publish
-        run: |
-          dotnet publish src/Secbox.Sentinel.Service/Secbox.Sentinel.Service.csproj `
-            -c ${{ env.CONFIGURATION }} `
-            -r win-x64 --self-contained true `
-            -p:PublishSingleFile=false -p:PublishTrimmed=false
-
-      # Publish the WPF AlertUI into the SAME folder as the service. Both
-      # exes co-exist in INSTALLFOLDER; the service launches AlertUI from
-      # AppContext.BaseDirectory at runtime.
-      #
-      # Self-contained single-file: .NET 10 + WPF runtime are embedded in
-      # the exe (~62MB). Lets the alert dialog run on machines without
-      # the Desktop Runtime separately installed. SelfContained / single-
-      # file settings come from the csproj — we just publish with the
-      # output redirected next to the service.
-      - name: Publish AlertUI into service folder
-        run: |
-          dotnet publish src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj `
-            -c ${{ env.CONFIGURATION }} `
-            -r win-x64 `
-            -o src/Secbox.Sentinel.Service/bin/${{ env.CONFIGURATION }}/net10.0-windows/win-x64/publish
-
-      - name: Upload publish dir
-        uses: actions/upload-artifact@v4
-        with:
-          name: sentinel-publish
-          path: src/Secbox.Sentinel.Service/bin/${{ env.CONFIGURATION }}/net10.0-windows/win-x64/publish/**
-          if-no-files-found: error
-
-  # -------------------------------------------------------------------------
-  # 4. Build Sentinel installer MSI (WiX v5).
-  # -------------------------------------------------------------------------
-  build-installer:
-    name: Build Sentinel MSI (WiX v5)
-    runs-on: windows-latest
-    needs: [ publish-sentinel ]
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
-
-      - name: Download Sentinel publish output
-        uses: actions/download-artifact@v4
-        with:
-          name: sentinel-publish
-          path: sentinel-publish
-
-      - name: Build MSI
-        env:
-          HarvestFolder: ${{ github.workspace }}\sentinel-publish
-        run: |
-          dotnet build src/Secbox.Sentinel.Setup/Secbox.Sentinel.Setup.wixproj `
-            -c ${{ env.CONFIGURATION }}
-
-      - name: Stage MSI
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/installer | Out-Null
-          Copy-Item src/Secbox.Sentinel.Setup/bin/${{ env.CONFIGURATION }}/*.msi dist/installer/SecboxSentinel.msi -Force
-
-      - name: Upload MSI
-        uses: actions/upload-artifact@v4
-        with:
-          name: sentinel-msi
-          path: dist/installer/SecboxSentinel.msi
-          if-no-files-found: error
-
-  # -------------------------------------------------------------------------
-  # 4b. Preflight: secrets aren't readable in job-level `if:`, so a tiny
+  # 2. Preflight: secrets aren't readable in job-level `if:`, so a tiny
   #     check job reads them into an output that downstream jobs can gate on.
   # -------------------------------------------------------------------------
   signing-preflight:
@@ -250,13 +128,12 @@ jobs:
           fi
 
   # -------------------------------------------------------------------------
-  # 5. (Optional) sign everything that can be signed. Skipped if secrets
-  #    aren't configured.
+  # 3. (Optional) sign the bridge bundle. Skipped if secrets aren't configured.
   # -------------------------------------------------------------------------
   sign:
     name: Sign artifacts (optional)
     runs-on: windows-latest
-    needs: [ build-managed, build-profiler, build-installer, signing-preflight ]
+    needs: [ build-managed, signing-preflight ]
     if: needs.signing-preflight.outputs.enabled == 'true'
     steps:
       - uses: actions/checkout@v4
@@ -266,16 +143,6 @@ jobs:
         with:
           name: bridge-bundle
           path: signing-input/bridge
-      - name: Download profiler
-        uses: actions/download-artifact@v4
-        with:
-          name: secbox-profiler-win-x64
-          path: signing-input/profiler
-      - name: Download MSI
-        uses: actions/download-artifact@v4
-        with:
-          name: sentinel-msi
-          path: signing-input/installer
 
       - name: Submit to SignPath
         uses: signpath/github-action-submit-signing-request@v1
@@ -297,14 +164,14 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------------
-  # 6. Compute hashes + create GitHub Release with everything attached.
+  # 4. Compute hashes + create GitHub Release with everything attached.
   # -------------------------------------------------------------------------
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [ build-managed, build-profiler, build-installer, sign ]
+    needs: [ build-managed, sign ]
     # `sign` is allowed to be skipped (no secrets). Don't gate on it.
-    if: always() && !cancelled() && (needs.build-managed.result == 'success' && needs.build-profiler.result == 'success' && needs.build-installer.result == 'success')
+    if: always() && !cancelled() && needs.build-managed.result == 'success'
     steps:
       - uses: actions/checkout@v4
 
@@ -325,13 +192,11 @@ jobs:
       - name: Stage release files
         run: |
           mkdir -p release
-          # Prefer signed/, fall back to unsigned bundles.
+          # Prefer signed/, fall back to unsigned bundle.
           if [ -d "artifacts/signed-artifacts" ]; then
             cp -r artifacts/signed-artifacts/* release/
           else
             cp artifacts/bridge-bundle/* release/
-            cp artifacts/secbox-profiler-win-x64/secbox-profiler-win-x64.dll release/
-            cp artifacts/sentinel-msi/SecboxSentinel.msi release/
           fi
           echo "::group::Release contents"
           ls -la release/
@@ -359,7 +224,7 @@ jobs:
           if [ -f "$notes_file" ]; then
             notes_arg=(--notes-file "$notes_file")
           else
-            notes_arg=(--notes "Bridge bundle, native CLR profiler (Tier B), and Sentinel installer (Tier A). See hashes.txt for SHA-256s and README.md for distribution details.")
+            notes_arg=(--notes "Bridge bundle (Secbox.Core + deps + Tier E decision dialog). See hashes.txt for SHA-256s and README.md for distribution details.")
           fi
 
           if gh release view "$tag" >/dev/null 2>&1; then

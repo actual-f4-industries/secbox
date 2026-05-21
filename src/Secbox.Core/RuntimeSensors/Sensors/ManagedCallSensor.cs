@@ -55,6 +55,15 @@ public sealed class ManagedCallSensor : ISensor
     // whether the prefix even ran). Reset on StopAsync.
     static long _prefixHits;
     public static long PrefixHits => Interlocked.Read(ref _prefixHits);
+    // Re-entrancy guard for the suspend launch. SuspendAndDecide starts
+    // SecboxAlertUI.exe with Process.Start — the very method we patch. The
+    // library that triggered the suspend is still on this thread's stack, so
+    // without this flag the launch re-enters the prefix, re-attributes to that
+    // library, and calls SuspendAndDecide again → unbounded recursion →
+    // StackOverflow (uncatchable; kills the editor). Set only for the duration
+    // of our own launch; the nested prefix sees it and passes straight through.
+    // Thread-static: a suspend on one thread must not blind other threads.
+    [ThreadStatic] static bool _suspending;
     Harmony? _harmony;
 
     public Task StartAsync(SensorOptions options, ChannelWriter<SensorEvent> sink, CancellationToken ct)
@@ -65,14 +74,29 @@ public sealed class ManagedCallSensor : ISensor
             _sink = sink;
             _policy = options.Enforcement ?? new EnforcementPolicy();
             _trust = ManagedCallTrustStore.Load();
+            Trace("──────── ATTACH ────────");
+            Trace($"StartAsync: Secbox.Core at '{SafeAsmLocation()}' (dev-drop path = dev mode active)");
+            Trace($"StartAsync: BlockLibraryProcessStart={_policy.BlockLibraryProcessStart}, editorPid={Environment.ProcessId}");
+            Trace($"StartAsync: ResolveAlertUiPath='{ResolveAlertUiPath() ?? "(NOT FOUND next to Core.dll)"}'");
+            // s&box ships its OWN Mono.Cecil in the Default ALC, a different
+            // version than MonoMod expects. MonoMod's Cecil-backed IL generator
+            // binds to it and fails to load ("CecilILGenerator … violates the
+            // constraint of TTarget"), killing all patching. Force MonoMod's
+            // DynamicMethod (Reflection.Emit) backend, which uses no Cecil. Must
+            // be set before the first MonoMod use — it caches the choice at init.
+            Environment.SetEnvironmentVariable("MONOMOD_DMD_TYPE", "DynamicMethod");
+            Trace($"StartAsync: MONOMOD_DMD_TYPE set to '{Environment.GetEnvironmentVariable("MONOMOD_DMD_TYPE")}' (force Reflection.Emit; avoid s&box Cecil)");
+            EnsureHarmonyLoadable(); // MUST precede `new Harmony` — see method comment
             _harmony = new Harmony(HarmonyId);
             PatchProcessStart(_harmony);
             Status = SensorStatus.Healthy;
+            Trace("StartAsync: status=Healthy");
         }
         catch (Exception ex)
         {
             LastError = $"{ex.GetType().Name}: {ex.Message}";
             Status = SensorStatus.Failed;
+            Trace($"StartAsync: FAILED — {ex}");
         }
         return Task.CompletedTask;
     }
@@ -106,11 +130,13 @@ public sealed class ManagedCallSensor : ISensor
         var staticStarts = typeof(Process)
             .GetMethods(BindingFlags.Public | BindingFlags.Static)
             .Where(m => m.Name == "Start" && m.ReturnType == typeof(Process));
+        int staticPatched = 0;
         foreach (var m in staticStarts)
         {
-            try { h.Patch(m, prefix: staticPrefix, postfix: staticPostfix); }
-            catch { /* per-overload — one failure shouldn't lose the rest */ }
+            try { h.Patch(m, prefix: staticPrefix, postfix: staticPostfix); staticPatched++; }
+            catch (Exception ex) { Trace($"PatchProcessStart: static overload patch failed — {ex.Message}"); }
         }
+        Trace($"PatchProcessStart: patched {staticPatched} static Process.Start overload(s)");
 
         // Instance Process.Start() — invoked after `new Process { StartInfo = … }`.
         // Returns bool. Postfix reads __instance.Id to get the spawned PID.
@@ -118,9 +144,10 @@ public sealed class ManagedCallSensor : ISensor
             .GetMethod("Start", BindingFlags.Public | BindingFlags.Instance, Type.EmptyTypes);
         if (instanceStart != null)
         {
-            try { h.Patch(instanceStart, prefix: instancePrefix, postfix: instancePostfix); }
-            catch { }
+            try { h.Patch(instanceStart, prefix: instancePrefix, postfix: instancePostfix); Trace("PatchProcessStart: patched instance Process.Start()"); }
+            catch (Exception ex) { Trace($"PatchProcessStart: instance patch failed — {ex.Message}"); }
         }
+        else Trace("PatchProcessStart: instance Process.Start() NOT FOUND");
     }
 
     // Prefix / Postfix bodies — private-static is what Harmony reflects to.
@@ -144,10 +171,12 @@ public sealed class ManagedCallSensor : ISensor
     static bool StaticStartPrefix(out object? __state, ref Process? __result)
     {
         __state = null;
+        if (_suspending) { Trace("StaticStartPrefix: re-entrant (our own AlertUI launch) → pass through"); return true; }
         try
         {
             Interlocked.Increment(ref _prefixHits);
             var lib = AttributeToLibrary();
+            Trace($"StaticStartPrefix: hit#{PrefixHits} attributed={(lib?.AssemblyName ?? "(none — not a library frame)")}");
             if (lib == null) return true;
 
             RecordAttribution(lib);
@@ -157,11 +186,14 @@ public sealed class ManagedCallSensor : ISensor
                 if (_trust.IsTrusted(lib.AssemblyName))
                 {
                     // Previously trusted via "Allow & Trust" — skip prompt.
+                    Trace($"  trusted → allow without prompt: {lib.AssemblyName}");
                     __state = lib;
                     return true;
                 }
 
+                Trace($"  enforce ON → SuspendAndDecide: {lib.AssemblyName}!{lib.MethodName}");
                 var decision = SuspendAndDecide(lib);
+                Trace($"  SuspendAndDecide returned {decision} (0=Block 1=Allow 2=Trust 3=Kill)");
                 if (ApplyDecision(decision, lib))
                 {
                     __state = lib;
@@ -171,11 +203,13 @@ public sealed class ManagedCallSensor : ISensor
                 return false; // Block / Kill (kill already exited)
             }
 
+            Trace("  enforce OFF (BlockLibraryProcessStart=false) → observe-only, allow");
             __state = lib;
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Trace($"StaticStartPrefix: EX {ex.GetType().Name}: {ex.Message}");
             __state = null;
             return true;
         }
@@ -194,10 +228,12 @@ public sealed class ManagedCallSensor : ISensor
     static bool InstanceStartPrefix(out object? __state, ref bool __result)
     {
         __state = null;
+        if (_suspending) { Trace("InstanceStartPrefix: re-entrant (our own AlertUI launch) → pass through"); return true; }
         try
         {
             Interlocked.Increment(ref _prefixHits);
             var lib = AttributeToLibrary();
+            Trace($"InstanceStartPrefix: hit#{PrefixHits} attributed={(lib?.AssemblyName ?? "(none — not a library frame)")}");
             if (lib == null) return true;
 
             RecordAttribution(lib);
@@ -206,11 +242,14 @@ public sealed class ManagedCallSensor : ISensor
             {
                 if (_trust.IsTrusted(lib.AssemblyName))
                 {
+                    Trace($"  trusted → allow without prompt: {lib.AssemblyName}");
                     __state = lib;
                     return true;
                 }
 
+                Trace($"  enforce ON → SuspendAndDecide: {lib.AssemblyName}!{lib.MethodName}");
                 var decision = SuspendAndDecide(lib);
+                Trace($"  SuspendAndDecide returned {decision} (0=Block 1=Allow 2=Trust 3=Kill)");
                 if (ApplyDecision(decision, lib))
                 {
                     __state = lib;
@@ -220,11 +259,13 @@ public sealed class ManagedCallSensor : ISensor
                 return false;
             }
 
+            Trace("  enforce OFF (BlockLibraryProcessStart=false) → observe-only, allow");
             __state = lib;
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Trace($"InstanceStartPrefix: EX {ex.GetType().Name}: {ex.Message}");
             __state = null;
             return true;
         }
@@ -249,6 +290,7 @@ public sealed class ManagedCallSensor : ISensor
     static LibraryAttribution? AttributeToLibrary()
     {
         var st = new StackTrace(skipFrames: 2, fNeedFileInfo: false);
+        var rejected = new List<string>(); // debug: non-internal frames that failed the library test
         for (int i = 0; i < st.FrameCount; i++)
         {
             var frame = st.GetFrame(i);
@@ -260,7 +302,11 @@ public sealed class ManagedCallSensor : ISensor
             if (IsInternalAssembly(asmName)) continue;
 
             var path = TryGetAssemblyLocation(asm);
-            if (!IsLibraryAttributable(asm, asmName, path)) continue;
+            if (!IsLibraryAttributable(asm, asmName, path))
+            {
+                rejected.Add($"{asmName}[alc={SafeAlcName(asm)};path={path ?? "(empty/in-memory)"}]");
+                continue;
+            }
 
             return new LibraryAttribution
             {
@@ -271,6 +317,11 @@ public sealed class ManagedCallSensor : ISensor
                 AssemblyPath = path,
             };
         }
+        // No library frame matched. Dump the non-internal candidates we DID see
+        // so an attribution miss is diagnosable (wrong ALC name? path not under
+        // \Libraries\ or \.bin\? name missing the package. prefix?).
+        if (rejected.Count > 0)
+            Trace($"AttributeToLibrary: no match; non-internal frames considered: {string.Join(" | ", rejected)}");
         return null;
     }
 
@@ -325,15 +376,18 @@ public sealed class ManagedCallSensor : ISensor
         //    races this child to read+delete the single payload file, leaving
         //    the loser to abort with "payload missing" (exit 1 == Allow).
         var payloadPath = WriteSuspendPayload(lib);
-        if (payloadPath == null) return Decision.Block; // can't ask, fail safe
+        if (payloadPath == null) { Trace("SuspendAndDecide: WriteSuspendPayload FAILED → Block"); return Decision.Block; }
+        Trace($"SuspendAndDecide: payload at '{payloadPath}'");
 
         // 3. Resolve AlertUI exe — same folder as this assembly.
         var exe = ResolveAlertUiPath();
         if (string.IsNullOrEmpty(exe))
         {
+            Trace("SuspendAndDecide: AlertUI exe NOT FOUND next to Core.dll → Block");
             TryCleanupPayload(payloadPath);
             return Decision.Block;
         }
+        Trace($"SuspendAndDecide: launching '{exe}' and waiting (up to 10 min)…");
 
         // 4. Synchronous launch + wait.
         try
@@ -347,18 +401,49 @@ public sealed class ManagedCallSensor : ISensor
             };
             psi.ArgumentList.Add(payloadPath);
 
-            using var p = Process.Start(psi);
-            if (p == null) return Decision.Block;
+            // Guard ONLY the launch: this Process.Start is the re-entrant call
+            // into our own patch. WaitForExit below is not Process.Start, so it
+            // doesn't need the flag — and we want the flag cleared while we
+            // block for up to 10 minutes (other library spawns on OTHER threads
+            // must still be intercepted normally).
+            Process? p;
+            _suspending = true;
+            try { p = Process.Start(psi); }
+            finally { _suspending = false; }
+            if (p == null) { Trace("SuspendAndDecide: Process.Start returned null → Block"); return Decision.Block; }
+            Trace($"SuspendAndDecide: AlertUI pid={SafePid(p)} started; waiting for exit…");
 
-            if (!p.WaitForExit((int)TimeSpan.FromMinutes(10).TotalMilliseconds))
+            using (p)
             {
-                try { p.Kill(entireProcessTree: true); } catch { }
-                return Decision.Block;
+                // Block the calling thread until AlertUI exits — that block IS
+                // the suspension — capped at 10 min. We POLL HasExited rather
+                // than trust WaitForExit(int): on the cold first launch of the
+                // self-contained single-file exe, WaitForExit(600000) was seen
+                // returning false within ~16 ms (before the dialog even renders),
+                // which wrongly fell through to Block and handed the caller a
+                // null/unstarted process. HasExited reads the real kernel state.
+                var deadline = DateTime.UtcNow + TimeSpan.FromMinutes(10);
+                while (true)
+                {
+                    bool exited;
+                    try { exited = p.HasExited; }
+                    catch { exited = true; } // handle gone — treat as exited
+                    if (exited) break;
+                    if (DateTime.UtcNow >= deadline)
+                    {
+                        Trace("SuspendAndDecide: 10-min cap reached → kill + Block");
+                        try { p.Kill(entireProcessTree: true); } catch { }
+                        return Decision.Block;
+                    }
+                    Thread.Sleep(150);
+                }
+                Trace($"SuspendAndDecide: AlertUI exited with code {p.ExitCode}");
+                return p.ExitCode;
             }
-            return p.ExitCode;
         }
-        catch
+        catch (Exception ex)
         {
+            Trace($"SuspendAndDecide: launch EX {ex.GetType().Name}: {ex.Message} → Block");
             return Decision.Block;
         }
         finally
@@ -580,6 +665,14 @@ public sealed class ManagedCallSensor : ISensor
     static bool IsInternalAssembly(string name) =>
         name.Length == 0
         || name.StartsWith("Secbox.", StringComparison.OrdinalIgnoreCase)
+        // The secbox s&box library/adapter itself — ident "f4industries.secbox",
+        // assemblies like "package.f4industries.secbox.editor". Its own
+        // Process.Start calls are infrastructure, not library threats: the
+        // adapter spawns SecboxAlertUI.exe (RuntimeMonitorCoordinator) and runs
+        // msiexec (SentinelInstaller). Without this exclusion secbox flags
+        // itself, and — worse — its AlertUI spawn is re-intercepted into a
+        // recursive dialog storm. Never attribute/intercept our own code.
+        || name.IndexOf("f4industries.secbox", StringComparison.OrdinalIgnoreCase) >= 0
         || name.Equals("0Harmony", StringComparison.OrdinalIgnoreCase)
         || name.StartsWith("HarmonyLib", StringComparison.OrdinalIgnoreCase)
         || name.StartsWith("MonoMod", StringComparison.OrdinalIgnoreCase)
@@ -631,6 +724,142 @@ public sealed class ManagedCallSensor : ISensor
             return string.IsNullOrEmpty(loc) ? null : loc;
         }
         catch { return null; }
+    }
+
+    // ───────────────────────── Debug tracing ─────────────────────────
+    // TEMPORARY diagnostic trace for the Tier E suspend path. Appends to
+    // %LOCALAPPDATA%\secbox\managed-call-trace.log. Low volume — only fires on
+    // Process.Start interception. Remove or gate behind an env var before ship.
+    static readonly string TraceLogPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "secbox", "managed-call-trace.log");
+    static readonly object _traceGate = new();
+
+    static void Trace(string msg)
+    {
+        try
+        {
+            var line = $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff} "
+                + $"[pid {Environment.ProcessId} t{Environment.CurrentManagedThreadId}] {msg}{Environment.NewLine}";
+            lock (_traceGate) { File.AppendAllText(TraceLogPath, line); }
+        }
+        catch { /* tracing must never disturb the patched call */ }
+    }
+
+    static string SafeAsmLocation()
+    {
+        try { var l = typeof(ManagedCallSensor).Assembly.Location; return string.IsNullOrEmpty(l) ? "(in-memory)" : l; }
+        catch { return "(unknown)"; }
+    }
+
+    static string SafeAlcName(Assembly asm)
+    {
+        try { return System.Runtime.Loader.AssemblyLoadContext.GetLoadContext(asm)?.Name ?? "(default)"; }
+        catch { return "(error)"; }
+    }
+
+    static int SafePid(Process p)
+    {
+        try { return p.Id; } catch { return -1; }
+    }
+
+    // Make 0Harmony loadable by Harmony's runtime patcher.
+    //
+    // The s&box adapter loads Secbox.Core (and our 0Harmony.dll dependency)
+    // into a COLLECTIBLE AssemblyLoadContext for hot-reload (SecboxCoreLoader,
+    // isCollectible: true). Harmony's MonoMod backend patches by emitting
+    // detour/trampoline code into a NON-collectible dynamic assembly in the
+    // DEFAULT context, and that emitted code references 0Harmony by name. A
+    // non-collectible assembly may not reference a collectible one, so every
+    // Harmony.Patch() throws:
+    //     Could not load file or assembly '0Harmony, …'.
+    //     Operation is not supported. (0x80131515)
+    // — patching ZERO methods and silently disabling all Tier E interception.
+    //
+    // Fix: pre-load 0Harmony into the Default (non-collectible) context BEFORE
+    // the first `new Harmony(...)`. Resolution of Core's 0Harmony reference then
+    // falls through our collectible ALC to Default and binds to this copy, which
+    // the emitted detours can legally reference. Idempotent and best-effort:
+    // if it can't run, patching simply fails as before (logged).
+    // Set once we've installed the Default-ALC resolver for the MonoMod closure.
+    static int _defaultResolverHooked;
+
+    static void EnsureHarmonyLoadable()
+    {
+        try
+        {
+            var dir = Path.GetDirectoryName(typeof(ManagedCallSensor).Assembly.Location);
+            if (string.IsNullOrEmpty(dir))
+            {
+                Trace("EnsureHarmonyLoadable: Core has no on-disk location — cannot stage MonoMod into Default");
+                return;
+            }
+
+            // Harmony 2.4.x splits MonoMod into several assemblies (MonoMod.Core,
+            // .RuntimeDetour, .Utils, .Backports, .ILHelpers …). 0Harmony AND all
+            // of them must resolve to ONE copy in the Default (non-collectible)
+            // context: MonoMod emits its detours there, a non-collectible
+            // assembly may not reference a collectible one, and two copies of any
+            // of these collide on type identity. Once 0Harmony is in Default, ITS
+            // dependencies resolve via Default — which has no idea where our
+            // dev/cache folder is — so install a Default resolver that serves the
+            // whole 0Harmony/MonoMod.* closure from next to Core.dll.
+            if (Interlocked.Exchange(ref _defaultResolverHooked, 1) == 0)
+            {
+                System.Runtime.Loader.AssemblyLoadContext.Default.Resolving += (ctx, name) =>
+                {
+                    var n = name.Name ?? "";
+                    if (!string.Equals(n, "0Harmony", StringComparison.OrdinalIgnoreCase)
+                        && !n.StartsWith("MonoMod", StringComparison.OrdinalIgnoreCase))
+                        return null;
+                    var p = Path.Combine(dir, n + ".dll");
+                    if (!File.Exists(p)) { Trace($"Default.Resolving: {n} → not found at {p}"); return null; }
+                    var loaded = ctx.LoadFromAssemblyPath(p);
+                    Trace($"Default.Resolving: {n} v{loaded.GetName().Version} → Default ALC");
+                    return loaded;
+                };
+                Trace("EnsureHarmonyLoadable: installed Default resolver for 0Harmony + MonoMod.*");
+            }
+
+            // Kick the chain off by ensuring 0Harmony itself is in Default; the
+            // resolver above then pulls in MonoMod.Core/.RuntimeDetour/etc.
+            PreloadIntoDefault("0Harmony");
+        }
+        catch (Exception ex)
+        {
+            Trace($"EnsureHarmonyLoadable: FAILED {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    static void PreloadIntoDefault(string assemblyName)
+    {
+        try
+        {
+            var def = System.Runtime.Loader.AssemblyLoadContext.Default;
+            foreach (var a in def.Assemblies)
+            {
+                if (string.Equals(a.GetName().Name, assemblyName, StringComparison.OrdinalIgnoreCase))
+                {
+                    Trace($"Preload: {assemblyName} already in Default ALC");
+                    return;
+                }
+            }
+
+            var dir = Path.GetDirectoryName(typeof(ManagedCallSensor).Assembly.Location);
+            var path = string.IsNullOrEmpty(dir) ? null : Path.Combine(dir, assemblyName + ".dll");
+            if (path == null || !File.Exists(path))
+            {
+                Trace($"Preload: {assemblyName}.dll NOT FOUND (dir='{dir ?? "(in-memory)"}')");
+                return;
+            }
+
+            var asm = def.LoadFromAssemblyPath(path);
+            Trace($"Preload: {asm.GetName().Name} v{asm.GetName().Version} → Default ALC");
+        }
+        catch (Exception ex)
+        {
+            Trace($"Preload: {assemblyName} FAILED {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     [DllImport("kernel32", EntryPoint = "GetCurrentThreadId")]

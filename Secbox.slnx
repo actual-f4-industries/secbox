@@ -5,12 +5,6 @@
     <Project Path="src/Secbox.Core/Secbox.Core.csproj" />
     <Project Path="src/Secbox.Rules/Secbox.Rules.csproj" />
     <Project Path="src/Secbox.Scanner/Secbox.Scanner.csproj" />
-  </Folder>
-  <Folder Name="/src/Sentinel/">
-    <Project Path="src/Secbox.Sentinel.Contracts/Secbox.Sentinel.Contracts.csproj" />
-    <Project Path="src/Secbox.Sentinel.Client/Secbox.Sentinel.Client.csproj" />
-    <Project Path="src/Secbox.Sentinel.Engine/Secbox.Sentinel.Engine.csproj" />
-    <Project Path="src/Secbox.Sentinel.Service/Secbox.Sentinel.Service.csproj" />
-    <Project Path="src/Secbox.Sentinel.Setup/Secbox.Sentinel.Setup.wixproj" />
+    <Project Path="src/Secbox.Sentinel.AlertUI/Secbox.Sentinel.AlertUI.csproj" />
   </Folder>
 </Solution>

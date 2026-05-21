@@ -22,16 +22,9 @@
         <ProjectReference Include="..\Secbox.Contracts\Secbox.Contracts.csproj" />
         <ProjectReference Include="..\Secbox.Rules\Secbox.Rules.csproj" />
         <ProjectReference Include="..\Secbox.Scanner\Secbox.Scanner.csproj" />
-        <ProjectReference Include="..\Secbox.Sentinel.Client\Secbox.Sentinel.Client.csproj" />
     </ItemGroup>
 
     <ItemGroup>
-        <!--
-            DiagnosticsClient.AttachProfiler — used by ProfilerCoordinator to
-            attach Tier B from inside the editor process (attach mode, no
-            launcher shim required).
-        -->
-        <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.553101" />
         <!--
             Lib.Harmony — runtime IL patching used by ManagedCallSensor
             (Tier E) to intercept `System.Diagnostics.Process.Start` and
@@ -40,7 +33,7 @@
             CallAttributionRing so a subsequent kernel ProcessStart event
             on the same thread can be joined with library attribution.
         -->
-        <PackageReference Include="Lib.Harmony" Version="2.3.6" />
+        <PackageReference Include="Lib.Harmony" Version="2.4.2" />
     </ItemGroup>
 
     <!--
